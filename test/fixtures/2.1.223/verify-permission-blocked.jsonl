@@ -1,0 +1,3 @@
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"mcp__wf-example__webflow_guide_tool"}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","content":"Claude requested permissions to use mcp__wf-example__webflow_guide_tool, but you haven't granted it yet."}]}}
+{"type":"result","result":"I need your permission to access the Webflow guide tool."}

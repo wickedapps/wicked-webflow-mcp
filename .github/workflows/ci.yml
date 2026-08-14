@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # 20 is the floor declared in package.json engines; 22 is what we develop
+        # against. Both run so a syntax feature newer than the floor fails here
+        # rather than on a user's machine.
+        node: ['20', '22']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm test
+
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install -g @anthropic-ai/claude-code
+      # Validating the directory checks marketplace.json ONLY — when both files
+      # exist the marketplace wins and plugin.json is never looked at. Point at
+      # the plugin manifest explicitly or it goes unchecked.
+      # --strict fails on warnings, including missing metadata.
+      - run: claude plugin validate . --strict
+      - run: claude plugin validate .claude-plugin/plugin.json --strict

@@ -1,0 +1,15 @@
+Checking MCP server health…
+
+claude.ai Webflow: https://mcp.webflow.com/mcp - ✔ Connected
+claude.ai some.tool: https://mcp.example.com/mcp - ! Needs authentication
+notes: https://mcp.example.com/notes - ✔ Connected
+calendar: https://mcp.example.com/calendar - ! Needs authentication
+docs: https://mcp.example.com/docs - ✔ Connected
+mail: https://mcp.example.com/mail - ! Needs authentication
+chat: https://mcp.example.com/chat - ✔ Connected
+tasks: https://mcp.example.com/tasks - ! Needs authentication
+files: https://mcp.example.com/files - ✔ Connected
+search: https://mcp.example.com/search - ! Needs authentication
+wiki: https://mcp.example.com/wiki - ✔ Connected
+local-bin: /usr/local/bin/example-mcp --app desktop --agent cli - ✔ Connected
+home-bin: /Users/example/.local/bin/example-mcp  - ✔ Connected

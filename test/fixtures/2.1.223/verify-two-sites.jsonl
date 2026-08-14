@@ -1,0 +1,3 @@
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"mcp__wf-example__data_sites_tool"}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","content":[{"type":"text","text":"{\"label\":\"list_sites\",\"action\":\"list_sites\",\"result\":{\"sites\":[{\"id\":\"5f0000000000000000000001\",\"displayName\":\"Example Site\",\"workspaceId\":\"5f0000000000000000000002\"},{\"id\":\"5f0000000000000000000004\",\"displayName\":\"Example Staging\",\"workspaceId\":\"5f0000000000000000000002\"}],\"pagination\":{\"total\":2,\"offset\":0,\"returned\":2,\"hasMore\":false}}}"}]}]}}
+{"type":"result","result":"Example Site\nExample Staging"}

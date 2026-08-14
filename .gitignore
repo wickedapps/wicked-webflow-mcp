@@ -1,0 +1,26 @@
+# Local / private
+internal/
+.env
+.env.*
+
+# Node
+node_modules/
+npm-debug.log*
+*.tsbuildinfo
+
+# Runtime artifacts
+state.json
+mcp-list-cache.json
+activate.log
+scratch/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Logs and temp
+*.log
+tmp/

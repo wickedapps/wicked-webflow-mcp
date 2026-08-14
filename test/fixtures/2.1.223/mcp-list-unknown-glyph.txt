@@ -1,0 +1,4 @@
+Checking MCP server health…
+
+wf-hatchline: https://mcp.webflow.com/mcp - ✔ Connected
+wf-future: https://mcp.webflow.com/mcp - ◆ Reticulating splines

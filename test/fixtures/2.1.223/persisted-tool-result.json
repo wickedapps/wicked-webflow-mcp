@@ -1,0 +1,1 @@
+[{"type":"text","text":"{\"label\":\"list_sites\",\"action\":\"list_sites\",\"result\":{\"sites\":[{\"id\":\"5f0000000000000000000001\",\"displayName\":\"Example Site\",\"shortName\":\"example-site\",\"workspaceId\":\"5f0000000000000000000002\"}],\"pagination\":{\"total\":1,\"offset\":0,\"returned\":1,\"hasMore\":false}}}"}]

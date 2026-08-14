@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "wicked-webflow-mcp",
+  "description": "Wicked Apps tooling for Claude Code. Currently: per-client Webflow MCP connections that stay authorized simultaneously.",
+  "owner": { "name": "Wicked Apps", "url": "https://github.com/wickedapps" },
+  "plugins": [
+    {
+      "name": "wwm",
+      "displayName": "Wicked Webflow MCP",
+      "description": "Keep every client's Webflow MCP connection live at once, and load only the ones each project needs.",
+      "source": "./",
+      "version": "0.1.0",
+      "license": "ISC",
+      "keywords": ["webflow", "mcp", "agency", "multi-tenant", "oauth"]
+    }
+  ]
+}

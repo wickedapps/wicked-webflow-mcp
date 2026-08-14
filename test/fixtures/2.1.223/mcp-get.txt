@@ -1,0 +1,7 @@
+wf-example:
+  Scope: User config (available in all your projects)
+  Status: ✔ Connected
+  Type: http
+  URL: https://mcp.webflow.com/mcp
+
+To remove this server, run: claude mcp remove wf-example -s user

@@ -1,0 +1,1094 @@
+#!/usr/bin/env node
+// wwm — manage per-client Webflow MCP connections for Claude Code.
+//
+// Single file, zero runtime dependencies. Every connection mutation goes
+// through the `claude` CLI; we never see, store, or transit a Webflow
+// credential. Claude Code's keychain owns them.
+//
+// This file is both the CLI and the module the tests import. Parsers are
+// pure functions with no I/O so they can be exercised against recorded
+// fixtures — see test/fixtures/. Everything that touches the network, the
+// filesystem, or a subprocess lives below the PARSERS section.
+
+import { spawnSync } from 'node:child_process'
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+export const MIN_CLAUDE_VERSION = '2.1.186' // introduced `claude mcp login <name>`
+export const MIN_NODE_MAJOR = 20
+export const DEFAULT_URL = 'https://mcp.webflow.com/mcp'
+export const DEFAULT_PREFIX = 'wf-'
+export const PLUGIN_ID = 'wicked-webflow-mcp'
+
+export const EXIT = {
+  OK: 0,
+  GENERIC: 1,
+  USAGE: 2,
+  PREFLIGHT: 3,
+  COLLISION: 4,
+  OVERSCOPED: 5,
+  VERIFY_FAILED: 6,
+  PARSE: 7,
+}
+
+// ---------------------------------------------------------------------------
+// PARSERS — pure, fixture-tested. No I/O in this section.
+//
+// `claude mcp list` and `claude mcp get` have no --json as of 2.1.223, so we
+// parse human-readable output from a CLI that ships several times a week.
+// This is the top ongoing maintenance cost of the project. On any line we do
+// not recognise we degrade loudly (exit 7) rather than guessing a status.
+// ---------------------------------------------------------------------------
+
+const HEALTH_PATTERNS = [
+  [/^connected\b/i, 'connected'],
+  [/^needs authentication\b/i, 'needs_auth'],
+  [/^failed to connect\b/i, 'failed'],
+  [/^pending approval\b/i, 'pending_approval'],
+]
+
+/**
+ * Map the status half of a list line ("✔ Connected") to a stable key.
+ * Returns null when unrecognised — callers must treat that as a parse
+ * failure, never as a default.
+ */
+export function parseHealth(statusText) {
+  // Strip the leading glyph (✔ ! ✘ ⏸) and match on the words. Matching text
+  // rather than glyphs survives Anthropic swapping the symbol set, which is
+  // a far more likely change than renaming the states.
+  const words = String(statusText).replace(/^[^\p{L}]+/u, '').trim()
+  for (const [re, key] of HEALTH_PATTERNS) if (re.test(words)) return key
+  return null
+}
+
+/**
+ * Parse `claude mcp list`.
+ *
+ * Real 2.1.223 output — note there is NO "(HTTP)" transport marker:
+ *
+ *   Checking MCP server health…
+ *
+ *   claude.ai Webflow: https://mcp.webflow.com/mcp - ✔ Connected
+ *   local-bin: /usr/local/bin/example-mcp --app desktop - ✔ Connected
+ *   home-bin: /Users/example/.local/bin/example-mcp  - ✔ Connected
+ *
+ * Two shapes that break naive parsing, both present above:
+ *   - names contain spaces and dots ("claude.ai some.tool")
+ *   - stdio targets contain flags, so " - " appears more than once
+ * Hence: name is everything before the FIRST ": ", status is everything
+ * after the LAST " - ".
+ */
+export function parseMcpList(text) {
+  const servers = []
+  const unparsed = []
+
+  for (const raw of String(text).split('\n')) {
+    const line = raw.trimEnd()
+    if (!line.trim()) continue
+    if (/^Checking MCP server health/i.test(line)) continue
+    if (/^No MCP servers configured/i.test(line)) continue
+
+    const split = /^(.+?):\s(.*)$/.exec(line)
+    if (!split) { unparsed.push(line); continue }
+
+    const name = split[1]
+    const rest = split[2]
+
+    const sep = rest.lastIndexOf(' - ')
+    if (sep === -1) { unparsed.push(line); continue }
+
+    const target = rest.slice(0, sep).trim()
+    const statusText = rest.slice(sep + 3).trim()
+    const health = parseHealth(statusText)
+    if (!health) { unparsed.push(line); continue }
+
+    servers.push({ name, target, health, statusText, raw: line })
+  }
+
+  return { servers, unparsed, ok: unparsed.length === 0 }
+}
+
+/**
+ * Parse `claude mcp get <name>`:
+ *
+ *   wf-hatchline:
+ *     Scope: User config (available in all your projects)
+ *     Status: ✔ Connected
+ *     Type: http
+ *     URL: https://mcp.webflow.com/mcp
+ */
+export function parseMcpGet(text) {
+  const out = { name: null, scope: null, health: null, statusText: null, type: null, url: null }
+  let sawAnyField = false
+
+  for (const raw of String(text).split('\n')) {
+    const line = raw.trim()
+    if (!line) continue
+
+    if (/^No MCP server named/i.test(line)) return { ...out, notFound: true, ok: false }
+
+    const header = /^(\S.*):$/.exec(line)
+    if (header && !out.name) { out.name = header[1]; continue }
+
+    const field = /^(Scope|Status|Type|URL|Command|Args):\s*(.*)$/i.exec(line)
+    if (!field) continue
+    sawAnyField = true
+    const [, key, value] = field
+    switch (key.toLowerCase()) {
+      case 'scope': out.scope = value; break
+      case 'status': out.statusText = value; out.health = parseHealth(value); break
+      case 'type': out.type = value; break
+      case 'url': out.url = value; break
+    }
+  }
+
+  return { ...out, notFound: false, ok: Boolean(out.name && sawAnyField) }
+}
+
+/**
+ * A tool_result larger than ~60KB is replaced in the transcript by a wrapper
+ * naming a file on disk plus a 2KB preview. The preview is truncated JSON, so
+ * it must never be parsed as the payload — return the path and let the caller
+ * decide whether it can read it.
+ */
+export function parsePersistedOutput(text) {
+  if (typeof text !== 'string' || !text.includes('<persisted-output>')) return null
+  // Capture to end of line, not to the first space: the path runs through the
+  // user's home directory and plenty of people have a space in a folder name.
+  const m = /Full output saved to:[ \t]*(.+?)[ \t]*$/m.exec(text)
+  return { path: m ? m[1] : null }
+}
+
+function textFromToolResultContent(content) {
+  // tool_result content is an array of blocks, a bare string, or occasionally
+  // a tool_reference marker with no payload at all.
+  if (typeof content === 'string') return [content]
+  if (!Array.isArray(content)) return []
+  const out = []
+  for (const block of content) {
+    if (typeof block === 'string') out.push(block)
+    else if (block && typeof block === 'object' && typeof block.text === 'string') out.push(block.text)
+  }
+  return out
+}
+
+/** Pull the sites payload out of one tool_result text blob. */
+function sitesFromText(text) {
+  let parsed
+  try { parsed = JSON.parse(text) } catch { return null }
+  const result = parsed && typeof parsed === 'object' ? parsed.result : null
+  if (!result || !Array.isArray(result.sites)) return null
+  const pagination = result.pagination && typeof result.pagination === 'object' ? result.pagination : {}
+  return {
+    sites: result.sites.map((s) => ({
+      name: s?.displayName ?? s?.shortName ?? '(unnamed)',
+      id: s?.id ?? null,
+      workspaceId: s?.workspaceId ?? null,
+    })),
+    total: typeof pagination.total === 'number' ? pagination.total : result.sites.length,
+    hasMore: pagination.hasMore === true,
+  }
+}
+
+/**
+ * Parse a `--output-format stream-json` transcript into a scope verdict.
+ *
+ * The model's prose is NEVER the answer. If the server does not load in this
+ * directory, the model can produce a confident list of sites having called no
+ * tool at all. Anything reading the final text would have recorded that as a
+ * successful verification.
+ *
+ * `readFile` is injected so this stays pure and testable; it is only used to
+ * follow a <persisted-output> pointer.
+ */
+export function parseVerifyTranscript(text, { readFile = null } = {}) {
+  let sawToolUse = false
+  let sawToolResult = false
+  let sawResultEvent = false
+  let finalText = null
+  let payload = null
+  let persistedUnreadable = null
+
+  for (const line of String(text).split('\n')) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+
+    let ev
+    try { ev = JSON.parse(trimmed) } catch { continue }
+    if (!ev || typeof ev !== 'object') continue
+
+    if (ev.type === 'result') {
+      sawResultEvent = true
+      if (typeof ev.result === 'string') finalText = ev.result
+    }
+
+    // `message` is sometimes a bare string rather than an object. An
+    // unguarded property access here crashes the parser mid-verify.
+    const message = ev.message
+    const content = message && typeof message === 'object' ? message.content : null
+    if (!Array.isArray(content)) continue
+
+    for (const block of content) {
+      if (!block || typeof block !== 'object') continue
+      if (block.type === 'tool_use') sawToolUse = true
+      if (block.type !== 'tool_result') continue
+      sawToolResult = true
+
+      for (const blob of textFromToolResultContent(block.content)) {
+        const persisted = parsePersistedOutput(blob)
+        if (persisted) {
+          if (!persisted.path || !readFile) { persistedUnreadable = persisted.path; continue }
+          let contents
+          try { contents = readFile(persisted.path) } catch { persistedUnreadable = persisted.path; continue }
+          // The persisted file holds the tool_result content verbatim, which
+          // is normally the block array rather than the payload itself — so
+          // unwrap it the same way before looking for sites.
+          let fromFile = sitesFromText(contents)
+          if (!fromFile) {
+            let unwrapped
+            try { unwrapped = JSON.parse(contents) } catch { unwrapped = null }
+            for (const inner of textFromToolResultContent(unwrapped)) {
+              const found = sitesFromText(inner)
+              if (found) { fromFile = found; break }
+            }
+          }
+          if (fromFile) payload = fromFile
+          else persistedUnreadable = persisted.path
+          continue
+        }
+        const found = sitesFromText(blob)
+        if (found) payload = found
+      }
+    }
+  }
+
+  if (payload) {
+    return {
+      ok: true,
+      sites: payload.sites,
+      total: payload.total,
+      hasMore: payload.hasMore,
+      workspaceIds: [...new Set(payload.sites.map((s) => s.workspaceId).filter(Boolean))],
+      isolated: payload.total === 1 && !payload.hasMore,
+      sawToolUse,
+      sawToolResult,
+      finalText,
+    }
+  }
+
+  // Everything below is "we could not tell", which is a different fact from
+  // "this connection is over-scoped" and must never collapse into it.
+  let reason
+  if (persistedUnreadable) reason = `tool result was persisted to ${persistedUnreadable} and could not be read`
+  else if (!sawResultEvent) reason = 'transcript ended without a result event (the headless call died)'
+  else if (!sawToolUse) reason = 'the model never called a tool — it answered from prose, so nothing was actually checked'
+  else if (!sawToolResult) reason = 'a tool was called but returned no result (permission block, or auth failure)'
+  else reason = 'tool results contained no recognisable sites payload'
+
+  return { ok: false, reason, sites: [], total: null, hasMore: false, workspaceIds: [], isolated: false, sawToolUse, sawToolResult, finalText }
+}
+
+/** `2.1.223 (Claude Code)` -> [2, 1, 223] */
+export function parseVersion(text) {
+  const m = /(\d+)\.(\d+)\.(\d+)/.exec(String(text))
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null
+}
+
+export function compareVersions(a, b) {
+  for (let i = 0; i < 3; i++) {
+    if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) < (b[i] ?? 0) ? -1 : 1
+  }
+  return 0
+}
+
+export function slugify(input) {
+  return String(input)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+}
+
+export const SLUG_RE = /^[a-z0-9][a-z0-9-]*$/
+
+/**
+ * Server names become tool-name prefixes (`mcp__wf-hatchline__*`), so every
+ * character is paid for in every tool name in every session, and anything
+ * outside [A-Za-z0-9_-] gets mangled.
+ */
+export function validateSlug(slug) {
+  if (!slug) return 'empty after slugification'
+  if (!SLUG_RE.test(slug)) return `must match ${SLUG_RE} (lowercase letters, digits, hyphens; no leading hyphen)`
+  if (slug.length > 32) return 'longer than 32 characters — every character costs context in every tool name'
+  return null
+}
+
+// ---------------------------------------------------------------------------
+// I/O below this line.
+// ---------------------------------------------------------------------------
+
+// Compare real paths, not URLs. When this file is reached through a symlink —
+// `npm link`, a PATH shim, or ${CLAUDE_PLUGIN_ROOT}/bin on PATH — argv[1] is the
+// symlink while import.meta.url is the resolved target, so a URL comparison is
+// false and the CLI exits 0 having printed nothing. That silent success is the
+// worst possible failure mode, so this guard is exercised by a test.
+export const isMainPath = (argv1, moduleUrl) => {
+  if (!argv1) return false
+  const real = (p) => { try { return realpathSync(p) } catch { return p } }
+  return real(fileURLToPath(moduleUrl)) === real(argv1)
+}
+
+const isMain = isMainPath(process.argv[1], import.meta.url)
+
+class Fail extends Error {
+  constructor(code, message, detail) {
+    super(message)
+    this.code = code
+    this.detail = detail
+  }
+}
+
+const ctx = {
+  json: false,
+  quiet: false,
+  yes: false,
+  dryRun: false,
+  verbose: false,
+}
+
+function human(msg = '') {
+  if (ctx.quiet) return
+  // Human output goes to stderr so a caller can capture stdout alone.
+  process.stderr.write(msg + '\n')
+}
+
+function emitJson(obj) {
+  process.stdout.write(JSON.stringify(obj, null, 2) + '\n')
+}
+
+const sym = { ok: '✔', warn: '⚠', bad: '✘', dot: '●', ring: '○' }
+
+// --- subprocess -------------------------------------------------------------
+
+function claudeBin() {
+  if (process.env.WWM_CLAUDE_BIN) return process.env.WWM_CLAUDE_BIN
+  const which = spawnSync('which', ['claude'], { encoding: 'utf8' })
+  if (which.status === 0 && which.stdout.trim()) return which.stdout.trim()
+  const candidates = [
+    join(homedir(), '.local', 'bin', 'claude'),
+    '/opt/homebrew/bin/claude',
+    '/usr/local/bin/claude',
+    join(homedir(), '.npm-global', 'bin', 'claude'),
+  ]
+  for (const c of candidates) if (existsSync(c)) return c
+  return null
+}
+
+/**
+ * `readOnly: true` marks a call that inspects state without changing it
+ * (`--version`, `mcp list`, `mcp get`). Those still execute under --dry-run,
+ * because a dry run that cannot read the version or check for a name
+ * collision is not a rehearsal of anything. Only mutating calls are stubbed.
+ */
+function runClaude(args, { cwd = undefined, timeout = 180_000, input = undefined, readOnly = false, interactive = false } = {}) {
+  const bin = claudeBin()
+  if (!bin) throw new Fail(EXIT.PREFLIGHT, 'Could not find the `claude` CLI on PATH.', 'Install Claude Code, or set WWM_CLAUDE_BIN to its path.')
+
+  const stub = ctx.dryRun && !readOnly
+  if (ctx.verbose || stub) human(`  ${stub ? '[dry-run] would run:' : '$'} ${bin} ${args.map((a) => (/\s/.test(a) ? JSON.stringify(a) : a)).join(' ')}`)
+  if (stub) return { status: 0, stdout: '', stderr: '', dryRun: true }
+
+  // `mcp login` prompts on stdin and needs the real terminal. spawnSync's
+  // default stdio is 'pipe', which makes the child see a pipe and refuse with
+  // "stdin isn't a terminal" even when wwm itself is running in Terminal.app.
+  // Inheriting hands over our TTY; the cost is that the child's output goes
+  // straight to the terminal and we get status only.
+  if (interactive) {
+    const res = spawnSync(bin, args, { cwd, timeout, stdio: 'inherit' })
+    if (res.error) throw new Fail(EXIT.GENERIC, `Failed to run \`claude ${args[0] ?? ''}\`: ${res.error.message}`)
+    return { status: res.status, stdout: '', stderr: '', interactive: true }
+  }
+
+  const res = spawnSync(bin, args, { encoding: 'utf8', cwd, timeout, input, maxBuffer: 64 * 1024 * 1024 })
+  if (res.error) throw new Fail(EXIT.GENERIC, `Failed to run \`claude ${args[0] ?? ''}\`: ${res.error.message}`)
+  if (ctx.verbose) {
+    human(`  -> exit ${res.status}`)
+    if (res.stdout?.trim()) human(res.stdout.trimEnd().split('\n').map((l) => `     ${l}`).join('\n'))
+    if (res.stderr?.trim()) human(res.stderr.trimEnd().split('\n').map((l) => `     ${l}`).join('\n'))
+  }
+  return { status: res.status, stdout: res.stdout ?? '', stderr: res.stderr ?? '' }
+}
+
+// --- config / state ---------------------------------------------------------
+
+function stateDir() {
+  const base = process.env.CLAUDE_PLUGIN_DATA || join(homedir(), '.claude', 'plugins', 'data', PLUGIN_ID)
+  mkdirSync(base, { recursive: true })
+  return base
+}
+
+function statePath() { return join(stateDir(), 'state.json') }
+
+function loadState() {
+  const p = statePath()
+  if (!existsSync(p)) return { version: 1, connections: {}, projects: {} }
+  try {
+    const parsed = JSON.parse(readFileSync(p, 'utf8'))
+    return {
+      version: parsed.version ?? 1,
+      connections: parsed.connections ?? {},
+      projects: parsed.projects ?? {},
+    }
+  } catch (e) {
+    throw new Fail(EXIT.GENERIC, `Could not read ${p}: ${e.message}`, 'Delete or repair the file and try again. It holds no secrets.')
+  }
+}
+
+function saveState(state) {
+  if (ctx.dryRun) return
+  writeFileSync(statePath(), JSON.stringify(state, null, 2) + '\n')
+}
+
+/**
+ * Verify must run somewhere with no `projects` entry, because
+ * `disabledMcpServers` for the cwd overrides `--mcp-config` entirely.
+ * Run it in the user's project and every deactivated connection silently
+ * "verifies" as unreachable.
+ */
+function scratchDir() {
+  const d = join(stateDir(), 'scratch')
+  mkdirSync(d, { recursive: true })
+  return d
+}
+
+function claudeJsonPath() { return join(homedir(), '.claude.json') }
+
+function readClaudeJson() {
+  try { return JSON.parse(readFileSync(claudeJsonPath(), 'utf8')) } catch { return null }
+}
+
+/**
+ * The `projects` map is keyed on the RESOLVED cwd — hence /private/tmp/... on
+ * macOS rather than /tmp/.... Writing the unresolved path creates a key
+ * nothing ever reads, and the failure is silent.
+ */
+function resolvedCwd(dir = process.cwd()) {
+  try { return realpathSync(dir) } catch { return dir }
+}
+
+function disabledServersFor(dir) {
+  const cfg = readClaudeJson()
+  const entry = cfg?.projects?.[resolvedCwd(dir)]
+  const list = entry?.disabledMcpServers
+  return Array.isArray(list) ? list : []
+}
+
+function prefix() { return process.env.CLAUDE_PLUGIN_OPTION_PREFIX || DEFAULT_PREFIX }
+function mcpUrl() { return process.env.CLAUDE_PLUGIN_OPTION_MCP_URL || DEFAULT_URL }
+function serverName(slug) { return `${prefix()}${slug}` }
+
+// --- preflight --------------------------------------------------------------
+
+function preflight({ full = false } = {}) {
+  const checks = []
+  const bin = claudeBin()
+  checks.push({ name: 'claude on PATH', ok: Boolean(bin), detail: bin ?? 'not found' })
+  if (!bin) return { ok: false, checks }
+
+  const versionOut = runClaude(['--version'], { timeout: 30_000, readOnly: true })
+  const version = parseVersion(versionOut.stdout)
+  const versionOk = version ? compareVersions(version, parseVersion(MIN_CLAUDE_VERSION)) >= 0 : false
+  checks.push({
+    name: `claude >= ${MIN_CLAUDE_VERSION}`,
+    ok: versionOk,
+    detail: version ? version.join('.') : `could not parse: ${versionOut.stdout.trim()}`,
+  })
+
+  const nodeMajor = Number(process.versions.node.split('.')[0])
+  checks.push({ name: `node >= ${MIN_NODE_MAJOR}`, ok: nodeMajor >= MIN_NODE_MAJOR, detail: `v${process.versions.node}` })
+
+  let dir = null
+  let writable = false
+  try { dir = stateDir(); writeFileSync(join(dir, '.write-test'), ''); writable = true } catch { writable = false }
+  checks.push({ name: 'plugin data writable', ok: writable, detail: dir ?? 'unavailable' })
+
+  // `mcp list` health-checks every configured server by opening real
+  // connections. Far too slow to run before every mutating command, so it is
+  // only part of a standalone `wwm doctor`.
+  if (full) {
+    const listed = runClaude(['mcp', 'list'], { readOnly: true })
+    const parsed = parseMcpList(listed.stdout + listed.stderr)
+    checks.push({
+      name: 'mcp list output parses',
+      ok: parsed.ok,
+      detail: parsed.ok
+        ? `${parsed.servers.length} server(s) recognised`
+        : `${parsed.unparsed.length} unrecognised line(s): ${parsed.unparsed[0]}`,
+    })
+  }
+
+  return { ok: checks.every((c) => c.ok), checks }
+}
+
+function requirePreflight() {
+  const result = preflight({ full: false })
+  if (result.ok) return
+  const failed = result.checks.filter((c) => !c.ok)
+  throw new Fail(
+    EXIT.PREFLIGHT,
+    `Preflight failed: ${failed.map((c) => c.name).join(', ')}`,
+    failed.map((c) => `  ${c.name}: ${c.detail}`).join('\n') + '\n\nRun `wwm doctor` for the full report.'
+  )
+}
+
+// --- mcp list, cached -------------------------------------------------------
+
+function cachePath() { return join(stateDir(), 'mcp-list-cache.json') }
+
+function listServers({ refresh = false, staleSeconds = 60 } = {}) {
+  if (!refresh) {
+    try {
+      const cached = JSON.parse(readFileSync(cachePath(), 'utf8'))
+      if (Date.now() - cached.at < staleSeconds * 1000) return { ...cached.data, cached: true }
+    } catch { /* fall through to a live call */ }
+  }
+
+  const res = runClaude(['mcp', 'list'], { readOnly: true })
+  if (res.dryRun) return { servers: [], unparsed: [], ok: true, cached: false }
+
+  const parsed = parseMcpList(res.stdout + res.stderr)
+  if (!parsed.ok) {
+    throw new Fail(
+      EXIT.PARSE,
+      "Couldn't read `claude mcp list` output — your Claude Code version may be newer than this plugin supports.",
+      `Unrecognised line(s):\n${parsed.unparsed.map((l) => `  ${l}`).join('\n')}\n\n` +
+        'Raw output follows so you can recover by hand:\n' +
+        (res.stdout + res.stderr).trimEnd()
+    )
+  }
+
+  try { writeFileSync(cachePath(), JSON.stringify({ at: Date.now(), data: parsed })) } catch { /* cache is optional */ }
+  return { ...parsed, cached: false }
+}
+
+// ---------------------------------------------------------------------------
+// COMMANDS
+// ---------------------------------------------------------------------------
+
+function cmdDoctor() {
+  const result = preflight({ full: true })
+  if (ctx.json) { emitJson({ ok: result.ok, checks: result.checks }); return result.ok ? EXIT.OK : EXIT.PREFLIGHT }
+
+  for (const c of result.checks) {
+    human(`${c.ok ? sym.ok : sym.bad} ${c.name.padEnd(28)} ${c.detail}`)
+  }
+  human('')
+  human(result.ok ? 'All checks passed.' : 'Some checks failed — see above.')
+  return result.ok ? EXIT.OK : EXIT.PREFLIGHT
+}
+
+function verifyOne(name, { model = 'haiku', timeout = 180_000 } = {}) {
+  const url = mcpUrl()
+  const args = [
+    '-p',
+    'Call data_sites_tool with action list_sites. Then reply with the site displayNames only, one per line.',
+    '--mcp-config', JSON.stringify({ mcpServers: { [name]: { type: 'http', url } } }),
+    // Without --strict-mcp-config a verify against one connection loads every
+    // configured server's schemas — the exact context bloat this tool exists
+    // to fix, paid on every verification.
+    '--strict-mcp-config',
+    '--allowedTools', `mcp__${name}__data_sites_tool`,
+    // Webflow's server instructs models to call webflow_guide_tool first, and
+    // that call returns ~60KB. Narrowing --allowedTools alone does NOT avoid
+    // it: the model tries anyway, hits the permission block, and gives up
+    // without answering. Only a system-prompt override actually works.
+    '--system-prompt',
+    'You are a scope checker. Do NOT call webflow_guide_tool or any setup/guide tool; it is not available and not needed. Call data_sites_tool directly with action=list_sites, then answer.',
+    '--model', model,
+    '--output-format', 'stream-json',
+    '--verbose',
+  ]
+
+  // cwd matters: see scratchDir().
+  const res = runClaude(args, { cwd: scratchDir(), timeout })
+  if (res.dryRun) return { server: name, ok: true, dryRun: true }
+
+  const verdict = parseVerifyTranscript(res.stdout, {
+    readFile: (p) => readFileSync(p, 'utf8'),
+  })
+
+  if (!verdict.ok) {
+    return {
+      server: name,
+      ok: false,
+      reason: verdict.reason,
+      finalText: verdict.finalText,
+      stderr: res.stderr?.trim() || null,
+    }
+  }
+
+  return {
+    server: name,
+    ok: true,
+    sites: verdict.sites.map((s) => s.name),
+    workspaceIds: verdict.workspaceIds,
+    total: verdict.total,
+    hasMore: verdict.hasMore,
+    isolated: verdict.isolated,
+  }
+}
+
+function recordVerification(state, name, result) {
+  const conn = state.connections[name] ?? { label: name, addedAt: new Date().toISOString() }
+  conn.lastVerified = result.ok
+    ? {
+        at: new Date().toISOString(),
+        sites: result.sites,
+        workspaceIds: result.workspaceIds,
+        isolated: result.isolated,
+        ok: true,
+      }
+    : { at: new Date().toISOString(), ok: false, reason: result.reason }
+  state.connections[name] = conn
+  return state
+}
+
+function cmdVerify(args) {
+  requirePreflight()
+  const state = loadState()
+
+  const all = args.flags.all || args.positional.length === 0
+  const model = args.flags.model ?? 'haiku'
+  const maxAge = parseDuration(args.flags['max-age'])
+
+  let names
+  if (all) {
+    names = Object.keys(state.connections)
+    if (names.length === 0) throw new Fail(EXIT.USAGE, 'No connections recorded yet.', 'Run `wwm connect <slug>` first.')
+    if (ctx.quiet && !args.flags.all) throw new Fail(EXIT.USAGE, '--quiet with no slug requires an explicit --all.', 'Nothing expensive should happen silently.')
+  } else {
+    names = args.positional.map((s) => (s.startsWith(prefix()) ? s : serverName(slugify(s))))
+  }
+
+  // ~$0.04 and 7-11s each, measured on 2.1.223 at haiku, charged to the
+  // user's own Claude account. Say so before spending it.
+  if (all && names.length > 1 && !ctx.quiet) {
+    human(`Verifying ${names.length} connections. Each spins a headless Claude session — roughly $${(names.length * 0.04).toFixed(2)} and ${Math.ceil((names.length * 9) / 60)} min total, billed to your Claude account.`)
+    human('')
+  }
+
+  const results = []
+  let anyOverscoped = false
+  let anyFailed = false
+
+  for (const name of names) {
+    const prior = state.connections[name]?.lastVerified
+    if (maxAge && prior?.ok && Date.now() - Date.parse(prior.at) < maxAge) {
+      results.push({ server: name, ok: true, sites: prior.sites, workspaceIds: prior.workspaceIds ?? [], isolated: prior.isolated, cached: true })
+      if (!prior.isolated) anyOverscoped = true
+      human(`  ${prior.isolated ? sym.ok : sym.warn} ${name}: ${prior.sites.join(', ')} (cached)`)
+      continue
+    }
+
+    human(`  … ${name}`)
+    const result = verifyOne(name, { model })
+    result.cached = false
+    results.push(result)
+    recordVerification(state, name, result)
+
+    if (!result.ok) {
+      anyFailed = true
+      human(`  ${sym.bad} ${name}: could not verify — ${result.reason}`)
+    } else if (!result.isolated) {
+      anyOverscoped = true
+      human(`  ${sym.warn} ${name}: reaches ${result.total} sites — ${result.sites.join(', ')}`)
+    } else {
+      human(`  ${sym.ok} ${name}: scoped to 1 site — ${result.sites[0]}`)
+    }
+  }
+
+  saveState(state)
+
+  if (ctx.json) emitJson({ ok: !anyFailed && !anyOverscoped, results })
+  else {
+    human('')
+    if (anyOverscoped) human(`${sym.warn} At least one connection reaches more than one site. Re-authorize it and tick only that client's site.`)
+    if (anyFailed) human(`${sym.bad} At least one connection could not be checked. That is NOT the same as "over-scoped" — we simply don't know.`)
+  }
+
+  // "over-scoped" and "we couldn't tell" are opposite facts and get distinct
+  // exit codes. Never collapse them.
+  if (anyFailed) return EXIT.VERIFY_FAILED
+  if (anyOverscoped) return EXIT.OVERSCOPED
+  return EXIT.OK
+}
+
+function cmdConnect(args) {
+  requirePreflight()
+
+  const input = args.positional[0]
+  if (!input) throw new Fail(EXIT.USAGE, 'Usage: wwm connect <slug> [--label "Name"] [--print-command]')
+
+  const slug = slugify(input)
+  const slugError = validateSlug(slug)
+  if (slugError) throw new Fail(EXIT.USAGE, `Invalid name "${input}": ${slugError}`)
+
+  const name = serverName(slug)
+  const label = args.flags.label ?? slug.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
+  const url = args.flags.url ?? mcpUrl()
+
+  // Collision check first — never let `already exists in local config` reach
+  // the user raw.
+  const listed = listServers({ refresh: true })
+  if (listed.servers.some((s) => s.name === name)) {
+    let suggestion = null
+    for (let i = 2; i < 20; i++) {
+      const candidate = `${name}-${i}`
+      if (!listed.servers.some((s) => s.name === candidate)) { suggestion = candidate; break }
+    }
+    throw new Fail(
+      EXIT.COLLISION,
+      `A server named "${name}" already exists.`,
+      `Reuse it as-is, remove it with \`wwm remove ${slug}\`, or pick another name${suggestion ? ` (e.g. \`wwm connect ${suggestion.slice(prefix().length)}\`)` : ''}.`
+    )
+  }
+
+  human(`Adding ${name} -> ${url}`)
+  const added = runClaude(['mcp', 'add', '--transport', 'http', name, url, '--scope', 'user'])
+  if (!added.dryRun && added.status !== 0) {
+    throw new Fail(EXIT.GENERIC, `\`claude mcp add\` failed for ${name}.`, (added.stderr || added.stdout).trim())
+  }
+
+  const state = loadState()
+  state.connections[name] = { label, addedAt: new Date().toISOString() }
+  saveState(state)
+
+  // `claude mcp login` requires a TTY. From an agent shell or the Bash tool it
+  // fails with "stdin isn't a terminal" before the browser flow even starts,
+  // so --print-command is the primary in-session path, not a fallback.
+  const noTty = !process.stdin.isTTY
+  if (args.flags['print-command'] || noTty) {
+    const cmd = `claude mcp login ${name}${args.flags['no-browser'] ? ' --no-browser' : ''}`
+    if (ctx.json) emitJson({ ok: true, server: name, label, scope: 'user', loginCommand: cmd, authorized: false, restartRequired: true })
+    else {
+      human('')
+      human(noTty && !args.flags['print-command']
+        ? 'This shell has no TTY, so `claude mcp login` cannot run here.'
+        : 'Server added. Authorize it by running this in your own terminal:')
+      human('')
+      human(`    ${cmd}`)
+      human('')
+      human(`On Webflow's consent screen: it lists EVERY site in EVERY workspace you can reach, and it is multi-select.`)
+      human(`Tick only ${label}'s site, and untick anything pre-selected — that tick is the isolation boundary.`)
+      human('')
+      human(`Then run: wwm verify ${slug}`)
+    }
+    return EXIT.OK
+  }
+
+  human('')
+  human(`Opening Webflow's consent screen in your browser.`)
+  human(`It lists EVERY site in EVERY workspace you can reach, and it is multi-select.`)
+  human(`Tick only ${label}'s site, and untick anything pre-selected.`)
+  human('')
+
+  const loginArgs = ['mcp', 'login', name]
+  if (args.flags['no-browser']) loginArgs.push('--no-browser')
+  const login = runClaude(loginArgs, { timeout: 300_000, interactive: true })
+
+  if (!login.dryRun && login.status !== 0) {
+    // Under stdio: 'inherit' the child's diagnostics already went to the
+    // terminal, so there is nothing to quote back — pointing at empty output
+    // would read as if we lost it.
+    const detail = (login.stderr || login.stdout).trim() || 'See the output above.'
+    const rollback = rollbackConnect(name)
+    throw new Fail(
+      EXIT.GENERIC,
+      `Authorization failed for ${name}.`,
+      `${detail}\n\nRolled back: ${rollback}`
+    )
+  }
+
+  if (args.flags['no-verify']) {
+    if (!args.flags.yes && !ctx.yes) {
+      throw new Fail(EXIT.USAGE, '--no-verify requires --yes.', 'Per-site scoping is enforced only by your click on the consent screen. `wwm verify` is not evidence about that — it is the only check that it worked.')
+    }
+    human('')
+    human(`${sym.warn} Skipped verification. Nothing has checked what this connection can actually reach.`)
+    if (ctx.json) emitJson({ ok: true, server: name, label, scope: 'user', verified: null, restartRequired: true })
+    return EXIT.OK
+  }
+
+  human('')
+  human('Verifying scope…')
+  const result = verifyOne(name)
+  const state2 = loadState()
+  recordVerification(state2, name, result)
+  saveState(state2)
+
+  if (!result.ok) {
+    if (ctx.json) emitJson({ ok: false, server: name, label, scope: 'user', verified: null, verifyError: result.reason, restartRequired: true })
+    else human(`${sym.bad} Connected, but scope could not be verified: ${result.reason}`)
+    return EXIT.VERIFY_FAILED
+  }
+
+  if (ctx.json) {
+    emitJson({
+      ok: true,
+      server: name,
+      label,
+      scope: 'user',
+      verified: { sites: result.sites, workspaceIds: result.workspaceIds, isolated: result.isolated, at: new Date().toISOString() },
+      restartRequired: true,
+    })
+  } else {
+    human('')
+    if (result.isolated) human(`${sym.ok} Correctly scoped to one site: ${result.sites[0]}`)
+    else {
+      human(`${sym.warn} This connection reaches ${result.total} sites: ${result.sites.join(', ')}`)
+      human(`   That is wider than one client. Re-authorize with \`claude mcp login ${name}\` and tick only ${label}'s site.`)
+    }
+    human('')
+    human('New connections load after Claude Code restarts.')
+  }
+
+  return result.isolated ? EXIT.OK : EXIT.OVERSCOPED
+}
+
+function rollbackConnect(name) {
+  // `mcp remove` is grant-destructive on its own, but logout-then-remove is
+  // still the correct order: logout while the named entry exists.
+  const out = []
+  const logout = runClaude(['mcp', 'logout', name])
+  out.push(`logout ${logout.status === 0 ? 'ok' : 'failed'}`)
+  const removed = runClaude(['mcp', 'remove', name])
+  out.push(`remove ${removed.status === 0 ? 'ok' : 'failed'}`)
+  try {
+    const state = loadState()
+    delete state.connections[name]
+    saveState(state)
+  } catch { /* best effort */ }
+  return out.join(', ')
+}
+
+function cmdStatus(args) {
+  requirePreflight()
+  const state = loadState()
+  const listed = listServers({
+    refresh: Boolean(args.flags.refresh),
+    staleSeconds: parseDuration(args.flags.stale) ? parseDuration(args.flags.stale) / 1000 : 60,
+  })
+
+  const disabled = new Set(disabledServersFor(process.cwd()))
+  const owned = listed.servers.filter((s) => s.name.startsWith(prefix()))
+
+  const rows = owned.map((s) => {
+    const conn = state.connections[s.name]
+    const v = conn?.lastVerified
+    return {
+      server: s.name,
+      label: conn?.label ?? '—',
+      health: s.health,
+      statusText: s.statusText,
+      sites: v?.ok ? v.sites : null,
+      workspaceIds: v?.ok ? (v.workspaceIds ?? []) : [],
+      isolated: v?.ok ? v.isolated : null,
+      verifiedAt: v?.at ?? null,
+      // ACTIVE is not an `mcp list` field: a disabled server still prints
+      // "✔ Connected". It must be read from disabledMcpServers.
+      active: !disabled.has(s.name),
+    }
+  })
+
+  if (ctx.json) {
+    emitJson({ ok: true, cwd: resolvedCwd(), servers: rows, cached: listed.cached })
+    return EXIT.OK
+  }
+
+  if (rows.length === 0) {
+    human('No wwm-managed connections yet. Run `wwm connect <client>` to add one.')
+    return EXIT.OK
+  }
+
+  human('CONNECTION'.padEnd(18) + 'LABEL'.padEnd(14) + 'HEALTH'.padEnd(12) + 'SCOPE'.padEnd(24) + 'ACTIVE')
+  for (const r of rows) {
+    const health = { connected: sym.ok, needs_auth: '! auth', failed: sym.bad, pending_approval: '⏸ pending', unknown: '?' }[r.health] ?? '?'
+    let scope
+    if (r.sites === null) scope = 'unverified'
+    else scope = `${r.sites.length} site${r.sites.length === 1 ? '' : 's'}${r.isolated ? '' : ' ' + sym.warn} (${relativeTime(r.verifiedAt)})`
+    human(r.server.padEnd(18) + String(r.label).slice(0, 13).padEnd(14) + health.padEnd(12) + scope.padEnd(24) + (r.active ? sym.dot : sym.ring))
+  }
+
+  const activeCount = rows.filter((r) => r.active).length
+  human('')
+  human(`${rows.length} connection${rows.length === 1 ? '' : 's'} · ${activeCount} active in ${resolvedCwd()}`)
+
+  for (const r of rows.filter((x) => x.isolated === false)) {
+    human(`${sym.warn} ${r.server} reaches ${r.sites.length} sites — re-authorize to scope it to one`)
+  }
+
+  // Two connections in one workspace may be intentional (one client, two
+  // sites) or may mean someone believes they have isolation they do not have.
+  // Surface the fact; don't adjudicate it.
+  const byWorkspace = new Map()
+  for (const r of rows) for (const w of r.workspaceIds) {
+    if (!byWorkspace.has(w)) byWorkspace.set(w, [])
+    byWorkspace.get(w).push(r.server)
+  }
+  for (const [ws, servers] of byWorkspace) {
+    if (servers.length > 1) human(`${sym.warn} ${servers.join(' and ')} share workspace ${ws.slice(0, 8)} — not separate tenants`)
+  }
+
+  return EXIT.OK
+}
+
+function cmdRemove(args) {
+  requirePreflight()
+  const input = args.positional[0]
+  if (!input) throw new Fail(EXIT.USAGE, 'Usage: wwm remove <slug> [--revoke] [--purge]')
+
+  const slug = slugify(input)
+  const name = input.startsWith(prefix()) ? input : serverName(slug)
+
+  // The help text says remove is config-only and logout is credentials.
+  // Empirically (2.1.223) remove ALSO invalidates the named grant everywhere,
+  // so there is no "remove but keep the token" option to offer.
+  if (!ctx.yes && !args.flags.yes) {
+    throw new Fail(
+      EXIT.USAGE,
+      `This will remove ${name} and destroy its Webflow authorization.`,
+      'Removing a server invalidates its stored grant everywhere — there is no way to remove it and keep the token.\n' +
+        'To deactivate a connection for one project without losing the grant, use `wwm switch` (M3) instead.\n' +
+        `Re-run with --yes to proceed.`
+    )
+  }
+
+  const steps = []
+  if (args.flags.revoke !== false) {
+    const logout = runClaude(['mcp', 'logout', name])
+    steps.push({ step: 'logout', ok: logout.dryRun || logout.status === 0 })
+  }
+  const removed = runClaude(['mcp', 'remove', name])
+  steps.push({ step: 'remove', ok: removed.dryRun || removed.status === 0 })
+
+  const state = loadState()
+  if (args.flags.purge) delete state.connections[name]
+  else if (state.connections[name]) state.connections[name].removedAt = new Date().toISOString()
+  saveState(state)
+
+  if (ctx.json) emitJson({ ok: steps.every((s) => s.ok), server: name, steps, purged: Boolean(args.flags.purge) })
+  else {
+    for (const s of steps) human(`${s.ok ? sym.ok : sym.bad} ${s.step}`)
+    human('')
+    human('Note: `mcp logout` clears the credential locally. To fully revoke the')
+    human("authorization, also remove it in Webflow's app settings.")
+  }
+
+  return steps.every((s) => s.ok) ? EXIT.OK : EXIT.GENERIC
+}
+
+// --- helpers ----------------------------------------------------------------
+
+function parseDuration(value) {
+  if (!value) return null
+  const m = /^(\d+)\s*([smhd])$/.exec(String(value).trim())
+  if (!m) return null
+  const n = Number(m[1])
+  return n * { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }[m[2]]
+}
+
+function relativeTime(iso) {
+  if (!iso) return 'never'
+  const delta = Date.now() - Date.parse(iso)
+  if (Number.isNaN(delta)) return 'unknown'
+  const mins = Math.floor(delta / 60_000)
+  if (mins < 1) return 'just now'
+  if (mins < 60) return `${mins}m ago`
+  const hours = Math.floor(mins / 60)
+  if (hours < 24) return `${hours}h ago`
+  return `${Math.floor(hours / 24)}d ago`
+}
+
+const VALUE_FLAGS = new Set(['label', 'url', 'model', 'max-age', 'stale', 'project'])
+
+export function parseArgv(argv) {
+  const flags = {}
+  const positional = []
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]
+    if (!arg.startsWith('--')) { positional.push(arg); continue }
+    const body = arg.slice(2)
+    const eq = body.indexOf('=')
+    if (eq !== -1) { flags[body.slice(0, eq)] = body.slice(eq + 1); continue }
+    if (VALUE_FLAGS.has(body)) { flags[body] = argv[++i]; continue }
+    if (body.startsWith('no-') && !['no-browser', 'no-verify'].includes(body)) flags[body.slice(3)] = false
+    else flags[body] = true
+  }
+  return { flags, positional }
+}
+
+const USAGE = `wwm — per-client Webflow MCP connections for Claude Code
+
+  wwm connect <slug>       add + authorize + verify, one flow
+  wwm verify [<slug>]      headless scope check (no slug = --all)
+  wwm status               health + scope + activation state
+  wwm remove <slug>        logout + remove (destroys the grant)
+  wwm doctor               preflight checks
+
+Global flags:
+  --json        machine-readable stdout (human output goes to stderr)
+  --quiet       suppress human output
+  --yes         assume yes for confirmations
+  --dry-run     print the claude commands, run none of them
+  --verbose     echo every subprocess and its output
+
+Exit codes: 0 ok · 2 usage · 3 preflight · 4 collision
+            5 over-scoped · 6 could not verify · 7 output parse failure
+`
+
+function main(argv) {
+  const parsed = parseArgv(argv)
+  ctx.json = Boolean(parsed.flags.json)
+  ctx.quiet = Boolean(parsed.flags.quiet)
+  ctx.yes = Boolean(parsed.flags.yes)
+  ctx.dryRun = Boolean(parsed.flags['dry-run'])
+  ctx.verbose = Boolean(parsed.flags.verbose)
+
+  const command = parsed.positional.shift()
+
+  if (!command || parsed.flags.help || command === 'help') {
+    process.stdout.write(USAGE)
+    return command ? EXIT.OK : EXIT.USAGE
+  }
+
+  switch (command) {
+    case 'doctor': return cmdDoctor(parsed)
+    case 'connect': return cmdConnect(parsed)
+    case 'verify': return cmdVerify(parsed)
+    case 'status': return cmdStatus(parsed)
+    case 'remove': return cmdRemove(parsed)
+    case 'switch':
+    case 'activate':
+      throw new Fail(EXIT.USAGE, `\`wwm ${command}\` is not implemented yet (M3).`, 'Connections are all active by default until then.')
+    default:
+      throw new Fail(EXIT.USAGE, `Unknown command: ${command}`, USAGE)
+  }
+}
+
+if (isMain) {
+  try {
+    process.exit(main(process.argv.slice(2)))
+  } catch (err) {
+    if (err instanceof Fail) {
+      if (ctx.json) emitJson({ ok: false, error: err.message, detail: err.detail ?? null, exitCode: err.code })
+      else {
+        process.stderr.write(`\n${sym.bad} ${err.message}\n`)
+        if (err.detail) process.stderr.write(`${err.detail}\n`)
+      }
+      process.exit(err.code)
+    }
+    process.stderr.write(`\n${sym.bad} Unexpected error: ${err?.stack ?? err}\n`)
+    process.exit(EXIT.GENERIC)
+  }
+}
