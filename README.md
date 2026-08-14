@@ -52,11 +52,10 @@ A new connection is usable immediately — no restart needed. (Measured on Claud
 
 ### Using `wwm` directly from your shell
 
-The plugin puts `wwm` on `PATH` **inside Claude Code sessions only**. If you would rather drive it from your own terminal — which is the nicer path for setting up several clients at once, since it does the whole connect-authorize-verify flow in one command — clone and link it:
+The plugin puts `wwm` on `PATH` **inside Claude Code sessions only**. If you would rather drive it from your own terminal — which is the nicer path for setting up several clients at once, since it does the whole connect-authorize-verify flow in one command:
 
 ```bash
-git clone https://github.com/wickedapps/wicked-webflow-mcp
-cd wicked-webflow-mcp && npm link
+npm install -g wicked-webflow-mcp
 
 wwm connect hatchline --label "Hatchline Studio"
 wwm verify hatchline
@@ -64,7 +63,7 @@ wwm status
 wwm remove hatchline --yes
 ```
 
-Zero dependencies; `npm link` just puts the one file on your `PATH`.
+Zero dependencies; that install puts the one file on your `PATH`. Requires Node **20+**.
 
 ---
 

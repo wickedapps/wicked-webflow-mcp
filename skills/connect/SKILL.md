@@ -15,7 +15,7 @@ Connect the client named "$ARGUMENTS" as an isolated Webflow MCP connection.
 
 **You cannot run `claude mcp login`.** It needs a real terminal and the Bash tool has none; it fails with `stdin isn't a terminal` and burns a rollback. So authorization is the one step you hand to the user.
 
-**Do not tell the user to run `wwm` in their terminal.** A plugin install puts `wwm` on `PATH` inside Claude Code sessions only, so `wwm verify …` in their shell gives them `command not found`. The only command you hand over is `claude mcp login`, which is on their normal `PATH`. If they want `wwm` in their own shell they have to clone the repo and `npm link` it — mention that only if they ask.
+**Do not tell the user to run `wwm` in their terminal.** A plugin install puts `wwm` on `PATH` inside Claude Code sessions only, so `wwm verify …` in their shell gives them `command not found`. The only command you hand over is `claude mcp login`, which is on their normal `PATH`. If they want `wwm` in their own shell, tell them to `npm install -g wicked-webflow-mcp` — mention that only if they ask.
 
 ## Steps
 
