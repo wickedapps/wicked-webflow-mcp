@@ -24,7 +24,7 @@ wf-northgate    → https://mcp.webflow.com/mcp   (authorized for Northgate's si
 
 All three stay connected. None of them needs re-authorizing to use another.
 
-That is the whole mechanic. This plugin does the naming, the collision checking, the scope verification, and — from M3 — the per-project activation that keeps twenty clients' tools from loading into every session.
+That is the whole mechanic. This plugin does the naming, the collision checking, and the scope verification.
 
 ## Install
 
@@ -86,16 +86,6 @@ That asymmetry is why `wwm verify` exists and why it runs by default. It asks th
 **`remove` destroys the grant.** On Claude Code 2.1.223, removing a server invalidates its stored authorization everywhere, at any scope. There is no way to remove a connection and keep its token, which is why deactivating for one project is a separate operation and not `remove`.
 
 ---
-
-## Status
-
-| | |
-|---|---|
-| **Engine** (`wwm connect/verify/status/remove`) | Working, tested live |
-| **Skills** (`/wwm:*`) | Working |
-| **Per-project activation** (`wwm switch`) | Not yet — M3 |
-
-Verified against Claude Code 2.1.223 on macOS. `claude mcp list` and `claude mcp get` have no JSON output, so this plugin parses their human output; the test suite pins that parsing against recorded fixtures per Claude Code version, and a format change shows up as a failing test rather than a wrong answer.
 
 ## License
 
