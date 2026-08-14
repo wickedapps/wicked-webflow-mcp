@@ -33,7 +33,7 @@ claude plugin marketplace add wickedapps/wicked-webflow-mcp
 claude plugin install wwm@wicked-webflow-mcp
 ```
 
-Requires Claude Code **2.1.186+** and Node **20+**. Run `wwm doctor` to check.
+Requires Claude Code **2.1.186+** and Node **22+**. Run `wwm doctor` to check.
 
 ## Use
 
@@ -63,7 +63,7 @@ wwm status
 wwm remove hatchline --yes
 ```
 
-Zero dependencies; that install puts the one file on your `PATH`. Requires Node **20+**.
+Zero dependencies; that install puts the one file on your `PATH`. Requires Node **22+**.
 
 ---
 

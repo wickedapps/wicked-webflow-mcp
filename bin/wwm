@@ -17,7 +17,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 export const MIN_CLAUDE_VERSION = '2.1.186' // introduced `claude mcp login <name>`
-export const MIN_NODE_MAJOR = 20
+export const MIN_NODE_MAJOR = 22
 export const DEFAULT_URL = 'https://mcp.webflow.com/mcp'
 export const DEFAULT_PREFIX = 'wf-'
 export const PLUGIN_ID = 'wicked-webflow-mcp'

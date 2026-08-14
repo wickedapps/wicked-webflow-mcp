@@ -10,10 +10,10 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        # 20 is the floor declared in package.json engines; 22 is what we develop
-        # against. Both run so a syntax feature newer than the floor fails here
-        # rather than on a user's machine.
-        node: ['20', '22']
+        # 22 is the floor declared in package.json engines (Node 20 went EOL
+        # 2026-04-30); 24 is Active LTS. Both run so a syntax feature newer
+        # than the floor fails here rather than on a user's machine.
+        node: ['22', '24']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

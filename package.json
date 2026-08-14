@@ -1,13 +1,13 @@
 {
   "name": "wicked-webflow-mcp",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Keep every client's Webflow MCP connection live at once, and load only the ones each project needs.",
   "type": "module",
   "bin": { "wwm": "./bin/wwm" },
   "files": ["bin/wwm"],
-  "engines": { "node": ">=20" },
+  "engines": { "node": ">=22" },
   "scripts": {
-    "test": "node --test \"test/**/*.test.js\"",
+    "test": "node --test test/*.test.js",
     "prepublishOnly": "npm test"
   },
   "repository": {
