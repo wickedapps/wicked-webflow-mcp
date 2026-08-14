@@ -770,7 +770,7 @@ function cmdConnect(args) {
   const noTty = !process.stdin.isTTY
   if (args.flags['print-command'] || noTty) {
     const cmd = `claude mcp login ${name}${args.flags['no-browser'] ? ' --no-browser' : ''}`
-    if (ctx.json) emitJson({ ok: true, server: name, label, scope: 'user', loginCommand: cmd, authorized: false, restartRequired: true })
+    if (ctx.json) emitJson({ ok: true, server: name, label, scope: 'user', loginCommand: cmd, authorized: false })
     else {
       human('')
       human(noTty && !args.flags['print-command']
@@ -816,7 +816,7 @@ function cmdConnect(args) {
     }
     human('')
     human(`${sym.warn} Skipped verification. Nothing has checked what this connection can actually reach.`)
-    if (ctx.json) emitJson({ ok: true, server: name, label, scope: 'user', verified: null, restartRequired: true })
+    if (ctx.json) emitJson({ ok: true, server: name, label, scope: 'user', verified: null })
     return EXIT.OK
   }
 
@@ -828,7 +828,7 @@ function cmdConnect(args) {
   saveState(state2)
 
   if (!result.ok) {
-    if (ctx.json) emitJson({ ok: false, server: name, label, scope: 'user', verified: null, verifyError: result.reason, restartRequired: true })
+    if (ctx.json) emitJson({ ok: false, server: name, label, scope: 'user', verified: null, verifyError: result.reason })
     else human(`${sym.bad} Connected, but scope could not be verified: ${result.reason}`)
     return EXIT.VERIFY_FAILED
   }
@@ -840,7 +840,6 @@ function cmdConnect(args) {
       label,
       scope: 'user',
       verified: { sites: result.sites, workspaceIds: result.workspaceIds, isolated: result.isolated, at: new Date().toISOString() },
-      restartRequired: true,
     })
   } else {
     human('')
@@ -850,7 +849,11 @@ function cmdConnect(args) {
       human(`   That is wider than one client. Re-authorize with \`claude mcp login ${name}\` and tick only ${label}'s site.`)
     }
     human('')
-    human('New connections load after Claude Code restarts.')
+    // Measured on 2.1.223: a server added AND authorized mid-session became
+    // callable from an already-running session with no restart. This line used
+    // to claim the opposite on no evidence. Don't reinstate it without a
+    // measurement — a spurious restart is a real cost in a setup flow.
+    human('Its tools are available now — no restart needed.')
   }
 
   return result.isolated ? EXIT.OK : EXIT.OVERSCOPED
@@ -911,13 +914,12 @@ function cmdStatus(args) {
     return EXIT.OK
   }
 
-  human('CONNECTION'.padEnd(18) + 'LABEL'.padEnd(14) + 'HEALTH'.padEnd(12) + 'SCOPE'.padEnd(24) + 'ACTIVE')
+  human('CONNECTION'.padEnd(18) + 'LABEL'.padEnd(14) + 'HEALTH'.padEnd(12) + 'SITES'.padEnd(SITES_COL) + 'ACTIVE')
   for (const r of rows) {
     const health = { connected: sym.ok, needs_auth: '! auth', failed: sym.bad, pending_approval: '⏸ pending', unknown: '?' }[r.health] ?? '?'
-    let scope
-    if (r.sites === null) scope = 'unverified'
-    else scope = `${r.sites.length} site${r.sites.length === 1 ? '' : 's'}${r.isolated ? '' : ' ' + sym.warn} (${relativeTime(r.verifiedAt)})`
-    human(r.server.padEnd(18) + String(r.label).slice(0, 13).padEnd(14) + health.padEnd(12) + scope.padEnd(24) + (r.active ? sym.dot : sym.ring))
+    const age = r.sites === null ? '' : ` (${relativeTime(r.verifiedAt)})`
+    const sites = formatSites(r.sites, r.isolated, age, SITES_COL)
+    human(r.server.padEnd(18) + String(r.label).slice(0, 13).padEnd(14) + health.padEnd(12) + sites.padEnd(SITES_COL) + (r.active ? sym.dot : sym.ring))
   }
 
   const activeCount = rows.filter((r) => r.active).length
@@ -996,6 +998,37 @@ function parseDuration(value) {
   if (!m) return null
   const n = Number(m[1])
   return n * { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }[m[2]]
+}
+
+export const SITES_COL = 30
+
+/**
+ * Render the SITES cell.
+ *
+ * This column used to read "1 site (just now)". That is the count, and the
+ * count is the one thing `verify` can already prove on its own — what it cannot
+ * prove is that the grant points at the client you meant. A correctly-isolated
+ * connection authorized against the wrong site passes every check we have and
+ * prints identically to a correct one. The site NAME is the only thing in the
+ * whole tool that catches it, and it was being thrown away here while sitting
+ * in state.json the entire time. So names go in the table even though they cost
+ * width and force truncation logic.
+ */
+export function formatSites(sites, isolated, age = '', width = SITES_COL) {
+  if (sites === null) return 'unverified'
+  if (sites.length === 0) return `${sym.warn} none${age}`
+
+  const head = isolated ? '' : `${sym.warn} ${sites.length}: `
+  const budget = Math.max(8, width - 1 - head.length - age.length)
+
+  // Drop whole names before cutting one mid-word. A clipped name reads as a
+  // different site ("Acme Mar…" could be Marketing or Market Research), and
+  // telling two sites apart is the entire reason this cell prints names.
+  for (let k = sites.length; k >= 1; k--) {
+    const body = sites.slice(0, k).join(', ') + (k < sites.length ? ` +${sites.length - k}` : '')
+    if (body.length <= budget) return head + body + age
+  }
+  return head + sites[0].slice(0, budget - 1) + '…' + age
 }
 
 function relativeTime(iso) {

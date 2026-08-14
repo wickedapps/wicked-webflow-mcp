@@ -7,17 +7,15 @@ description: Connect a new Webflow client site as its own named MCP server. Use 
 
 Connect the client named "$ARGUMENTS" as an isolated Webflow MCP connection.
 
-## Before you start
+**If "$ARGUMENTS" is empty, the user invoked this with no client name.** Ask for it and stop — do not guess one from the directory name or from existing connections. Everything below depends on knowing which client this is, including the consent-screen briefing, which names the site they should tick.
 
-`claude mcp login` needs a real terminal. The Bash tool does not have one, so **`wwm connect` cannot complete authorization from inside this session.** Run:
+## What you can and cannot do from here
 
-```
-wwm connect <slug> --print-command --json
-```
+**You can run every `wwm` command except `connect`'s browser step.** `wwm` is on your `PATH` in this session. `wwm verify` and `wwm status` are headless and work fine — run them yourself.
 
-This registers the connection and returns `loginCommand`. Give that command to the user to run in their own terminal. Do not try to run it yourself — it will fail with `stdin isn't a terminal` and you will have burned a rollback.
+**You cannot run `claude mcp login`.** It needs a real terminal and the Bash tool has none; it fails with `stdin isn't a terminal` and burns a rollback. So authorization is the one step you hand to the user.
 
-If the user is already working in a terminal and would rather do the whole thing there, tell them to run `wwm connect <slug>` directly. That path is better: it opens the browser and verifies scope in one flow.
+**Do not tell the user to run `wwm` in their terminal.** A plugin install puts `wwm` on `PATH` inside Claude Code sessions only, so `wwm verify …` in their shell gives them `command not found`. The only command you hand over is `claude mcp login`, which is on their normal `PATH`. If they want `wwm` in their own shell they have to clone the repo and `npm link` it — mention that only if they ask.
 
 ## Steps
 
@@ -34,9 +32,16 @@ If the user is already working in a terminal and would rather do the whole thing
    - **Do not tick the workspace row.** Each workspace name sits above its sites as its own checkbox. One click there grants every site in that workspace. It is one row from the correct answer, there is no confirmation, and the result looks identical afterwards.
    - Webflow refuses a selection spanning two workspaces. If this client's sites live in two workspaces, they need a second connection — offer it.
 
-4. Tell them to run `wwm verify <slug>` after authorizing, and to report the result back to you. Verification costs about $0.04 and ten seconds, charged to their own Claude account.
-5. Read the verify JSON. **If `isolated` is false, lead with that** — name every site that came back and offer to re-authorize. Do not bury it under a success message. An over-scoped grant looks exactly like a correct one until someone reads this line.
-6. Remind them that new connections load after Claude Code restarts.
+   Tell them here that you will check the scope automatically once they are done, and that it costs about $0.04 and ten seconds against their own Claude account. Say it now rather than asking permission later — it is part of connecting, and a mid-flow prompt just adds a round trip.
+
+4. Wait for them to say they have authorized. Then **run `wwm verify <slug> --json` yourself.** Do not ask them to run it.
+5. Read the verify JSON and report on two separate questions. They fail independently and a connection can pass one while failing the other:
+
+   **How many sites?** If `isolated` is false, lead with that — name every site that came back and offer to re-authorize. Do not bury it under a success message. An over-scoped grant looks exactly like a correct one until someone reads this line.
+
+   **Which site?** Say the returned site name out loud and ask whether it is the one they meant. `verify` proves the grant reaches exactly one site; it has no idea *which* site the client owns. A correctly-isolated grant on the wrong site passes every check in this tool. If the name looks unrelated to the client — a scratch site, a template, an old project — flag it rather than reporting success.
+
+6. The connection is usable immediately. Do not tell them to restart Claude Code; measured on 2.1.223, tools from a mid-session connection are callable without one.
 
 ## If they ask what the connection can actually do
 

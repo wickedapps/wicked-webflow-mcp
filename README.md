@@ -48,7 +48,7 @@ From inside Claude Code:
 
 **Authorizing has one step Claude Code cannot do for you.** `claude mcp login` opens a browser and needs a real terminal; the agent's shell does not have one. So `/wwm:connect` registers the connection, briefs you on the consent screen, and hands you a `claude mcp login wf-<slug>` line to paste into your own terminal. That is the design, not a limitation being worked around — the one irreducibly human step stays with the human.
 
-New connections load after Claude Code restarts.
+A new connection is usable immediately — no restart needed. (Measured on Claude Code 2.1.223: a server added and authorized mid-session was callable from an already-running session.)
 
 ### Using `wwm` directly from your shell
 
@@ -77,6 +77,8 @@ This is the part worth reading slowly, because the pitch and the mechanism are n
 **Per-site scoping is enforced by your click, and nothing else.** Webflow's consent screen lists every site in every workspace you can reach, and it is multi-select. Tick eight sites and you get one connection reaching eight clients — no warning, no error, and a result indistinguishable from a correct one. The workspace name sits above its sites as its own checkbox, so "this client's site" and "every site in this workspace" are one row apart.
 
 That asymmetry is why `wwm verify` exists and why it runs by default. It asks the connection what it can actually see and reports the answer. It is not corroboration of a guarantee — for per-site scoping, **it is the only enforcement there is.** `--no-verify` requires `--yes` for that reason.
+
+**Verify checks how many sites, not which one.** It can prove a grant reaches exactly one site. It cannot know which site you *meant* — a connection labeled `hatchline` authorized against a scratch site passes cleanly. That is why `wwm status` prints site names rather than a count: reading the name is currently the only thing that catches a correctly-isolated grant on the wrong target.
 
 **Isolation limits which site, never what can be done to it.** Within an authorized site the grant covers Designer-API element creation, CMS writes, style and custom-code changes, and asset management. "Isolated per client" does not mean read-only, restricted, or safe. It means a mistake is confined to one client's site instead of all of them.
 

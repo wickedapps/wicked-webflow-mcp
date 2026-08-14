@@ -13,7 +13,9 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
+  SITES_COL,
   compareVersions,
+  formatSites,
   isMainPath,
   parseArgv,
   parseHealth,
