@@ -11,7 +11,7 @@
 // filesystem, or a subprocess lives below the PARSERS section.
 
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -369,6 +369,61 @@ function emitJson(obj) {
 
 const sym = { ok: '✔', warn: '⚠', bad: '✘', dot: '●', ring: '○' }
 
+// --- interactive input ------------------------------------------------------
+
+/** Can we ask the user a question and expect an answer? */
+function canPrompt() {
+  return Boolean(process.stdin.isTTY) && !ctx.json && !ctx.quiet && !ctx.yes
+}
+
+/**
+ * Read one line, synchronously. main() is a straight-line synchronous function
+ * that returns an exit code, so readline (callback/promise based) cannot be used
+ * without restructuring every command.
+ *
+ * Reads from /dev/tty rather than fd 0 so a prompt still reaches the user when
+ * stdout or stdin is redirected. Returns null on EOF (^D) or if no terminal can
+ * be opened — callers must treat that as "no answer", never as an empty answer.
+ */
+function promptLine(question) {
+  let fd
+  try { fd = openSync('/dev/tty', 'rs') } catch { return null }
+
+  process.stderr.write(question)
+  const buf = Buffer.alloc(1)
+  const bytes = []
+  try {
+    for (;;) {
+      let n
+      try {
+        n = readSync(fd, buf, 0, 1, null)
+      } catch (e) {
+        // A tty in non-blocking mode yields EAGAIN between keystrokes; that is
+        // "nothing yet", not end of input.
+        if (e.code === 'EAGAIN') continue
+        if (e.code === 'EOF') break
+        throw e
+      }
+      if (n === 0) break // ^D
+      if (buf[0] === 0x0a) break // \n
+      if (buf[0] === 0x0d) continue // \r in a CRLF pair
+      if (buf[0] === 0x03) { process.stderr.write('\n'); process.exit(EXIT.GENERIC) } // ^C
+      bytes.push(buf[0])
+    }
+  } finally {
+    closeSync(fd)
+  }
+
+  if (bytes.length === 0) {
+    // Distinguish "pressed enter" (line terminated) from EOF. We only get here
+    // with an empty buffer either way, so treat empty as an empty answer and let
+    // the caller decide; EOF surfaces as a repeated empty answer and the caller
+    // bounds its retries.
+    return ''
+  }
+  return Buffer.from(bytes).toString('utf8').trim()
+}
+
 // --- subprocess -------------------------------------------------------------
 
 function claudeBin() {
@@ -724,11 +779,51 @@ function cmdVerify(args) {
   return EXIT.OK
 }
 
+const CONNECT_USAGE = 'Usage: wwm connect [<slug>] [--label "Name"] [--print-command]'
+
+/**
+ * Ask for the client name when `wwm connect` was run bare.
+ *
+ * Only when a human is actually there: with --json, --quiet, --yes or no TTY,
+ * a prompt would either corrupt the output stream or hang a script forever, so
+ * those keep the old usage error.
+ */
+function askForSlug() {
+  if (!canPrompt()) {
+    throw new Fail(
+      EXIT.USAGE,
+      'No client name given, and this shell cannot be prompted.',
+      `${CONNECT_USAGE}\n\nA name is only asked for interactively — not under --json, --quiet, --yes, or without a TTY.`
+    )
+  }
+
+  human('Which client is this connection for?')
+  human('A short name becomes the server name and the tool prefix, e.g. "hatchline" -> wf-hatchline.')
+  human('')
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const answer = promptLine('Client name: ')
+    if (answer === null) break
+    if (!answer) { human('  (nothing entered)'); continue }
+
+    const slug = slugify(answer)
+    const error = validateSlug(slug)
+    if (error) { human(`  ${sym.bad} "${answer}" won't work: ${error}`); continue }
+
+    // Slugification is silent otherwise, and the name they typed is not always
+    // the name they get — show the server name before it is created.
+    if (slug !== answer) human(`  -> ${serverName(slug)}`)
+    human('')
+    return slug
+  }
+
+  throw new Fail(EXIT.USAGE, 'No usable client name given.', CONNECT_USAGE)
+}
+
 function cmdConnect(args) {
   requirePreflight()
 
-  const input = args.positional[0]
-  if (!input) throw new Fail(EXIT.USAGE, 'Usage: wwm connect <slug> [--label "Name"] [--print-command]')
+  const input = args.positional[0] ?? askForSlug()
 
   const slug = slugify(input)
   const slugError = validateSlug(slug)
@@ -823,6 +918,13 @@ function cmdConnect(args) {
   human('')
   human('Verifying scope…')
   const result = verifyOne(name)
+  // A dry run never spent a verification, so there is no scope verdict to
+  // report and nothing to record. Reporting one would be inventing a result.
+  if (result.dryRun) {
+    if (ctx.json) emitJson({ ok: true, server: name, label, scope: 'user', verified: null, dryRun: true })
+    else human(`${sym.warn} Dry run — nothing was created, authorized, or verified.`)
+    return EXIT.OK
+  }
   const state2 = loadState()
   recordVerification(state2, name, result)
   saveState(state2)
@@ -1063,7 +1165,7 @@ export function parseArgv(argv) {
 
 const USAGE = `wwm — per-client Webflow MCP connections for Claude Code
 
-  wwm connect <slug>       add + authorize + verify, one flow
+  wwm connect [<slug>]     add + authorize + verify, one flow (asks if no slug)
   wwm verify [<slug>]      headless scope check (no slug = --all)
   wwm status               health + scope + activation state
   wwm remove <slug>        logout + remove (destroys the grant)

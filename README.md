@@ -63,6 +63,8 @@ wwm status
 wwm remove hatchline --yes
 ```
 
+Run `wwm connect` with no name and it asks for one, then shows the server name it will create (`acme client` → `wf-acme-client`) before creating it. It only asks when there is a real terminal to ask in — under `--json`, `--quiet`, `--yes`, or with no TTY, a missing name is still a usage error rather than a hang.
+
 Zero dependencies; that install puts the one file on your `PATH`. Requires Node **22+**.
 
 ---
