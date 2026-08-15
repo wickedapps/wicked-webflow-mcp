@@ -5,7 +5,7 @@ description: Connect a new Webflow client site as its own named MCP server. Use 
 
 # Connect a Webflow client
 
-Connect the client named "$ARGUMENTS" as an isolated Webflow MCP connection.
+Connect the client named "$ARGUMENTS" as its own named Webflow MCP connection.
 
 **If "$ARGUMENTS" is empty, the user invoked this with no client name.** Ask for it and stop — do not guess one from the directory name or from existing connections. Everything below depends on knowing which client this is, including the consent-screen briefing, which names the site they should tick.
 
@@ -21,25 +21,25 @@ Connect the client named "$ARGUMENTS" as an isolated Webflow MCP connection.
 
 1. Derive a slug from "$ARGUMENTS": lowercase, spaces and punctuation to hyphens. `Hatchline Studio` → `hatchline-studio`.
 2. Run `wwm connect <slug> --label "$ARGUMENTS" --print-command --json`.
-3. **Brief the user on the consent screens before they open the browser.** This click is the only thing enforcing per-client isolation and you cannot do it for them. There are two screens:
+3. **Brief the user on the consent screens before they open the browser.** These clicks decide what the connection can reach and you cannot make them for the user. There are two screens:
 
    **Screen 1 — `mcp.webflow.com`.** It names the connection: *"Claude Code (wf-<slug>)"*. Tell them to check that name matches the client they meant. They must tick **"I recognize and trust this URL"** for the `localhost` callback before **Continue** becomes clickable. If they miss it, nothing happens and there is no error — they will think it hung.
 
    **Screen 2 — `webflow.com`.** The site picker.
    - It lists **every site in every workspace** they can reach, not just this client's, and it is **multi-select**.
    - There is a **search box**. On an account with many sites, searching by name is the only sane way to find the right one.
-   - **Tick only "$ARGUMENTS"'s site.** Nothing is pre-selected by default, but tell them to untick anything already ticked anyway — checking is free and the default could change.
-   - **Do not tick the workspace row.** Each workspace name sits above its sites as its own checkbox. One click there grants every site in that workspace. It is one row from the correct answer, there is no confirmation, and the result looks identical afterwards.
+   - **Tick "$ARGUMENTS"'s site — or sites.** If this client has several sites, ticking all of them is correct and expected; one grant can cover a group. Nothing is pre-selected by default.
+   - **Do not tick the workspace row** unless they actually mean the whole workspace. Each workspace name sits above its sites as its own checkbox, and one click there grants every site in it, including other clients'. It is one row from the site rows, there is no confirmation, and the result looks identical afterwards.
    - Webflow refuses a selection spanning two workspaces. If this client's sites live in two workspaces, they need a second connection — offer it.
 
    Tell them here that you will check the scope automatically once they are done, and that it costs about $0.04 and ten seconds against their own Claude account. Say it now rather than asking permission later — it is part of connecting, and a mid-flow prompt just adds a round trip.
 
-4. Wait for them to say they have authorized. Then **run `wwm verify <slug> --json` yourself.** Do not ask them to run it.
-5. Read the verify JSON and report on two separate questions. They fail independently and a connection can pass one while failing the other:
+4. Wait for them to say they have authorized. Then **run `wwm verify <slug> --json` yourself.** Never ask the user to run a `wwm` command — see above.
+5. Read the verify JSON and **report the site names**: "authorized for 3 sites: A, B, C."
 
-   **How many sites?** If `isolated` is false, lead with that — name every site that came back and offer to re-authorize. Do not bury it under a success message. An over-scoped grant looks exactly like a correct one until someone reads this line.
+   **Do not treat several sites as a problem.** The picker is multi-select on purpose and clients routinely have more than one site. There is no over-scoped verdict and no exit code for it.
 
-   **Which site?** Say the returned site name out loud and ask whether it is the one they meant. `verify` proves the grant reaches exactly one site; it has no idea *which* site the client owns. A correctly-isolated grant on the wrong site passes every check in this tool. If the name looks unrelated to the client — a scratch site, a template, an old project — flag it rather than reporting success.
+   The question worth asking is whether those are the sites they meant — `verify` can see what the grant reaches, never which sites the client actually owns. Ask once, lightly. If a returned name looks unrelated to the client (a scratch site, a template, someone else's project), point at that specific name. If the list matches what they said they ticked, just confirm it and move on.
 
 6. The connection is usable immediately. Do not tell them to restart Claude Code; measured on 2.1.223, tools from a mid-session connection are callable without one.
 
@@ -47,10 +47,10 @@ Connect the client named "$ARGUMENTS" as an isolated Webflow MCP connection.
 
 Within the ticked site: nearly everything. Create and modify elements via the Designer API, write CMS items, change styles and custom code, manage assets.
 
-Per-site scoping limits **which** site, never **what** may be done to it. Never let "isolated" be heard as "read-only" or "limited".
+Per-site scoping limits **which** sites, never **what** may be done to them. Never let "scoped to this client" be heard as "read-only" or "limited".
 
 ## Failure handling
 
 If `wwm` reports a preflight failure, relay its message verbatim. **Do not attempt to run `claude mcp` commands directly as a workaround.** The engine owns naming, collision detection, rollback, and state; hand-rolling around it produces connections it cannot manage and cannot clean up.
 
-Exit codes: `3` preflight, `4` name collision, `5` over-scoped, `6` could not verify, `7` output parse failure. `6` is not `5` — "we could not check" is not "we checked and it was fine."
+Exit codes: `3` preflight, `4` name collision, `6` could not verify, `7` output parse failure. Exit `6` means nothing was checked — never report it as a clean result.

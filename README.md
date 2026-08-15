@@ -95,19 +95,21 @@ Three things to know, all of which are consequences of how Claude Code starts:
 
 ---
 
-## What "isolated" does and does not mean
+## What a connection can reach
 
 This is the part worth reading slowly, because the pitch and the mechanism are not the same thing.
 
+**A grant covers exactly the sites you tick.** Webflow's consent screen lists every site in every workspace you can reach, and it is multi-select. Tick one site and the connection sees one site; tick a client's five and it sees those five. Both are correct — plenty of clients have more than one site, and a grant covering a group is a normal thing to authorize, not a mistake. `wwm` reports what a connection reaches and leaves the judgment to you.
+
 **Webflow guarantees one thing: a single grant cannot span two workspaces.** That is enforced by Webflow's authorization server. Nothing you or this plugin can do will produce a cross-workspace grant. If each client sits in its own workspace, that happens to be exactly the boundary you want — and it holds whether or not anyone is paying attention.
 
-**Per-site scoping is enforced by your click, and nothing else.** Webflow's consent screen lists every site in every workspace you can reach, and it is multi-select. Tick eight sites and you get one connection reaching eight clients — no warning, no error, and a result indistinguishable from a correct one. The workspace name sits above its sites as its own checkbox, so "this client's site" and "every site in this workspace" are one row apart.
+**The click worth being careful about is the workspace row.** Each workspace name sits above its sites as its own checkbox, and one click there grants every site in it — including other clients'. It is one row from the site rows, there is no confirmation, and the result looks identical afterwards. That is the mis-tick `wwm verify` is good at catching: the site list comes back longer than the client you had in mind.
 
-That asymmetry is why `wwm verify` exists and why it runs by default. It asks the connection what it can actually see and reports the answer. It is not corroboration of a guarantee — for per-site scoping, **it is the only enforcement there is.** `--no-verify` requires `--yes` for that reason.
+**`wwm verify` shows you what a connection actually reaches**, by asking the live connection rather than trusting anyone's assumptions — including ours. It runs by default after `connect`, and `--no-verify` requires `--yes`, because a connection nothing has ever checked is an unknown rather than a clean one.
 
-**Verify checks how many sites, not which one.** It can prove a grant reaches exactly one site. It cannot know which site you *meant* — a connection labeled `hatchline` authorized against a scratch site passes cleanly. That is why `wwm status` prints site names rather than a count: reading the name is currently the only thing that catches a correctly-isolated grant on the wrong target.
+**It reports which sites, and cannot know which you meant.** A connection labeled `hatchline` authorized against a scratch site verifies cleanly. That is why `wwm status` prints site names rather than a count — reading the names is the only thing that catches a grant pointed at the wrong target.
 
-**Isolation limits which site, never what can be done to it.** Within an authorized site the grant covers Designer-API element creation, CMS writes, style and custom-code changes, and asset management. "Isolated per client" does not mean read-only, restricted, or safe. It means a mistake is confined to one client's site instead of all of them.
+**Scoping limits which sites, never what can be done to them.** Within an authorized site the grant covers Designer-API element creation, CMS writes, style and custom-code changes, and asset management. "Scoped to this client" does not mean read-only, restricted, or safe. It means a mistake is confined to that client's sites instead of every client you have.
 
 **This plugin never sees your credentials.** Every connection change is made by shelling out to the `claude` CLI. Tokens live in Claude Code's keychain storage; `wwm` reads connection names and health, and nothing else.
 

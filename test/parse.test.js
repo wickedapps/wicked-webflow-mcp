@@ -141,16 +141,20 @@ test('parseVerifyTranscript extracts one site from a real transcript', () => {
   const v = parseVerifyTranscript(fixture('verify-one-site.jsonl'))
   assert.equal(v.ok, true)
   assert.equal(v.total, 1)
-  assert.equal(v.isolated, true)
+  assert.equal(v.singleSite, true)
   assert.deepEqual(v.sites.map((s) => s.name), ['Example Site'])
   assert.deepEqual(v.workspaceIds, ['5f0000000000000000000002'])
 })
 
-test('parseVerifyTranscript reports over-scope from pagination.total', () => {
+test('a multi-site grant is a normal result, not a failure', () => {
+  // Webflow's consent screen is multi-select on purpose. Authorizing a client's
+  // several sites in one grant is a thing users do deliberately, so this reports
+  // the count and the names and passes.
   const v = parseVerifyTranscript(fixture('verify-two-sites.jsonl'))
   assert.equal(v.ok, true)
   assert.equal(v.total, 2)
-  assert.equal(v.isolated, false)
+  assert.equal(v.singleSite, false)
+  assert.equal(v.sites.length, 2)
   assert.equal(v.workspaceIds.length, 1, 'a grant cannot span workspaces')
 })
 
@@ -163,15 +167,15 @@ test('a prose answer with no tool call is NOT a verification', () => {
   assert.equal(v.ok, false)
   assert.equal(v.sawToolUse, false)
   assert.match(v.reason, /never called a tool/)
-  assert.equal(v.isolated, false)
+  assert.equal(v.singleSite, null, 'not false — we learned nothing about the site count')
   assert.ok(v.finalText, 'the prose is still captured for diagnostics')
 })
 
-test('a permission-blocked tool call is "could not tell", not "isolated"', () => {
+test('a permission-blocked tool call is "could not tell"', () => {
   const v = parseVerifyTranscript(fixture('verify-permission-blocked.jsonl'))
   assert.equal(v.ok, false)
   assert.equal(v.sawToolUse, true)
-  assert.equal(v.isolated, false)
+  assert.equal(v.singleSite, null)
 })
 
 test('a <persisted-output> wrapper is never mistaken for the payload', () => {
@@ -316,6 +320,28 @@ test('isMainPath does not throw on a nonexistent argv[1]', () => {
   // realpath() on a deleted/renamed path throws ENOENT; the guard must fall
   // back to the literal path rather than taking down the process at startup.
   assert.equal(isMainPath('/nonexistent/path/wwm', import.meta.url), false)
+})
+
+// ---------------------------------------------------------------------------
+// the status SITES cell
+// ---------------------------------------------------------------------------
+
+test('formatSites states the facts without editorialising', () => {
+  // A multi-site grant used to print a ⚠ here. It is a normal authorization —
+  // the cell reports what the connection reaches and lets the user judge it.
+  assert.equal(formatSites(['Hatchline'], ' (2h ago)'), 'Hatchline (2h ago)')
+  assert.equal(formatSites(['A', 'B', 'C'], ''), '3: A, B, C')
+  assert.ok(!formatSites(['A', 'B', 'C'], '').includes('⚠'))
+  assert.equal(formatSites(null), 'unverified')
+  assert.equal(formatSites([], ''), 'none')
+})
+
+test('formatSites drops whole names rather than clipping one', () => {
+  // A clipped name reads as a different site, and telling two sites apart is
+  // the entire reason this cell prints names at all.
+  const out = formatSites(['Hatchline Marketing', 'Hatchline Market Research'], '', SITES_COL)
+  assert.ok(out.length <= SITES_COL, `"${out}" is ${out.length} wide, budget ${SITES_COL}`)
+  assert.match(out, /\+1$/)
 })
 
 // ---------------------------------------------------------------------------

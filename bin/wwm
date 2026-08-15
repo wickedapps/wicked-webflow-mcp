@@ -23,7 +23,7 @@ export const DEFAULT_PREFIX = 'wf-'
 export const PLUGIN_ID = 'wicked-webflow-mcp'
 // npm ships only this file, so the version cannot be read from package.json.
 // Bump in lockstep with package.json, plugin.json, and marketplace.json.
-export const VERSION = '0.3.0'
+export const VERSION = '0.4.0'
 
 export const EXIT = {
   OK: 0,
@@ -31,7 +31,10 @@ export const EXIT = {
   USAGE: 2,
   PREFLIGHT: 3,
   COLLISION: 4,
-  OVERSCOPED: 5,
+  // 5 was OVERSCOPED — retired in 0.4.0. A grant covering several sites is a
+  // normal authorization, not a failure, so nothing returns it any more. The
+  // number stays burned rather than reused, so an old script reading exit 5 as
+  // "over-scoped" never gets a new meaning silently.
   VERIFY_FAILED: 6,
   PARSE: 7,
 }
@@ -274,7 +277,11 @@ export function parseVerifyTranscript(text, { readFile = null } = {}) {
       total: payload.total,
       hasMore: payload.hasMore,
       workspaceIds: [...new Set(payload.sites.map((s) => s.workspaceId).filter(Boolean))],
-      isolated: payload.total === 1 && !payload.hasMore,
+      // A fact, not a verdict. Webflow's consent screen is multi-select on
+      // purpose: authorizing a client's five sites in one grant is a normal
+      // thing to do, not a mistake to flag. What verify reports is what the
+      // connection reaches; whether that matches intent is the user's call.
+      singleSite: payload.total === 1 && !payload.hasMore,
       sawToolUse,
       sawToolResult,
       finalText,
@@ -282,7 +289,7 @@ export function parseVerifyTranscript(text, { readFile = null } = {}) {
   }
 
   // Everything below is "we could not tell", which is a different fact from
-  // "this connection is over-scoped" and must never collapse into it.
+  // any answer at all and must never be reported as one.
   let reason
   if (persistedUnreadable) reason = `tool result was persisted to ${persistedUnreadable} and could not be read`
   else if (!sawResultEvent) reason = 'transcript ended without a result event (the headless call died)'
@@ -290,7 +297,7 @@ export function parseVerifyTranscript(text, { readFile = null } = {}) {
   else if (!sawToolResult) reason = 'a tool was called but returned no result (permission block, or auth failure)'
   else reason = 'tool results contained no recognisable sites payload'
 
-  return { ok: false, reason, sites: [], total: null, hasMore: false, workspaceIds: [], isolated: false, sawToolUse, sawToolResult, finalText }
+  return { ok: false, reason, sites: [], total: null, hasMore: false, workspaceIds: [], singleSite: null, sawToolUse, sawToolResult, finalText }
 }
 
 /** `2.1.223 (Claude Code)` -> [2, 1, 223] */
@@ -463,6 +470,19 @@ function emitJson(obj) {
 const sym = { ok: '✔', warn: '⚠', bad: '✘', dot: '●', ring: '○' }
 
 // --- interactive input ------------------------------------------------------
+
+/**
+ * Are we running inside a Claude Code session (the Bash tool or a hook)?
+ *
+ * This decides who is told to do the next step. A plugin install puts `wwm` on
+ * PATH inside sessions ONLY, so the user's own terminal — the one place they
+ * can run `claude mcp login` — is exactly the place `wwm verify` does not
+ * exist. Handing them a `wwm` command there is a guaranteed `command not
+ * found`, and it is the agent, not the user, that should run the check.
+ */
+function insideClaudeSession() {
+  return Boolean(process.env.CLAUDECODE || process.env.CLAUDE_CODE_ENTRYPOINT || process.env.CLAUDE_PLUGIN_ROOT)
+}
 
 /** Can we ask the user a question and expect an answer? */
 function canPrompt() {
@@ -875,7 +895,7 @@ function verifyOne(name, { model = 'haiku', timeout = 180_000 } = {}) {
     workspaceIds: verdict.workspaceIds,
     total: verdict.total,
     hasMore: verdict.hasMore,
-    isolated: verdict.isolated,
+    singleSite: verdict.singleSite,
   }
 }
 
@@ -886,7 +906,7 @@ function recordVerification(state, name, result) {
         at: new Date().toISOString(),
         sites: result.sites,
         workspaceIds: result.workspaceIds,
-        isolated: result.isolated,
+        singleSite: result.singleSite,
         ok: true,
       }
     : { at: new Date().toISOString(), ok: false, reason: result.reason }
@@ -919,15 +939,13 @@ function cmdVerify(args) {
   }
 
   const results = []
-  let anyOverscoped = false
   let anyFailed = false
 
   for (const name of names) {
     const prior = state.connections[name]?.lastVerified
     if (maxAge && prior?.ok && Date.now() - Date.parse(prior.at) < maxAge) {
-      results.push({ server: name, ok: true, sites: prior.sites, workspaceIds: prior.workspaceIds ?? [], isolated: prior.isolated, cached: true })
-      if (!prior.isolated) anyOverscoped = true
-      human(`  ${prior.isolated ? sym.ok : sym.warn} ${name}: ${prior.sites.join(', ')} (cached)`)
+      results.push({ server: name, ok: true, sites: prior.sites, workspaceIds: prior.workspaceIds ?? [], singleSite: prior.singleSite ?? prior.isolated ?? null, cached: true })
+      human(`  ${sym.ok} ${name}: ${describeSites(prior.sites)} (cached)`)
       continue
     }
 
@@ -937,31 +955,33 @@ function cmdVerify(args) {
     results.push(result)
     recordVerification(state, name, result)
 
+    // A grant covering several sites is a normal thing to authorize — Webflow's
+    // picker is multi-select on purpose. Report the list; do not editorialise
+    // about its length. Only "we could not check" is a problem here.
     if (!result.ok) {
       anyFailed = true
       human(`  ${sym.bad} ${name}: could not verify — ${result.reason}`)
-    } else if (!result.isolated) {
-      anyOverscoped = true
-      human(`  ${sym.warn} ${name}: reaches ${result.total} sites — ${result.sites.join(', ')}`)
     } else {
-      human(`  ${sym.ok} ${name}: scoped to 1 site — ${result.sites[0]}`)
+      human(`  ${sym.ok} ${name}: ${describeSites(result.sites)}`)
     }
   }
 
   saveState(state)
 
-  if (ctx.json) emitJson({ ok: !anyFailed && !anyOverscoped, results })
-  else {
+  if (ctx.json) emitJson({ ok: !anyFailed, results })
+  else if (anyFailed) {
     human('')
-    if (anyOverscoped) human(`${sym.warn} At least one connection reaches more than one site. Re-authorize it and tick only that client's site.`)
-    if (anyFailed) human(`${sym.bad} At least one connection could not be checked. That is NOT the same as "over-scoped" — we simply don't know.`)
+    human(`${sym.bad} At least one connection could not be checked. That is "we don't know", not "it's fine".`)
   }
 
-  // "over-scoped" and "we couldn't tell" are opposite facts and get distinct
-  // exit codes. Never collapse them.
-  if (anyFailed) return EXIT.VERIFY_FAILED
-  if (anyOverscoped) return EXIT.OVERSCOPED
-  return EXIT.OK
+  return anyFailed ? EXIT.VERIFY_FAILED : EXIT.OK
+}
+
+/** "1 site — Hatchline" / "3 sites — Hatchline, Hatchline EU, Staging" */
+function describeSites(sites) {
+  const list = Array.isArray(sites) ? sites : []
+  if (list.length === 0) return 'no sites'
+  return `${list.length} site${list.length === 1 ? '' : 's'} — ${list.join(', ')}`
 }
 
 const CONNECT_USAGE = 'Usage: wwm connect [<slug>] [--label "Name"] [--print-command]'
@@ -1060,9 +1080,15 @@ function cmdConnect(args) {
       human(`    ${cmd}`)
       human('')
       human(`On Webflow's consent screen: it lists EVERY site in EVERY workspace you can reach, and it is multi-select.`)
-      human(`Tick only ${label}'s site, and untick anything pre-selected — that tick is the isolation boundary.`)
+      human(`Tick ${label}'s site or sites — that selection is what the connection will be able to reach.`)
+      human(`Do not tick the workspace row above them unless you mean the whole workspace.`)
       human('')
-      human(`Then run: wwm verify ${slug}`)
+      // Never hand back a `wwm` command here. A plugin install puts wwm on PATH
+      // inside Claude Code sessions only, so in the terminal where they just
+      // ran `claude mcp login` it is `command not found`.
+      human(insideClaudeSession()
+        ? `Then come back here and say "verify ${label}" — the check runs from this session.`
+        : `Then ask Claude Code to verify ${label}, or run \`wwm verify ${slug}\` if you have wwm installed.`)
     }
     return EXIT.OK
   }
@@ -1070,7 +1096,7 @@ function cmdConnect(args) {
   human('')
   human(`Opening Webflow's consent screen in your browser.`)
   human(`It lists EVERY site in EVERY workspace you can reach, and it is multi-select.`)
-  human(`Tick only ${label}'s site, and untick anything pre-selected.`)
+  human(`Tick ${label}'s site or sites; do not tick the workspace row above them.`)
   human('')
 
   const loginArgs = ['mcp', 'login', name]
@@ -1092,7 +1118,7 @@ function cmdConnect(args) {
 
   if (args.flags['no-verify']) {
     if (!args.flags.yes && !ctx.yes) {
-      throw new Fail(EXIT.USAGE, '--no-verify requires --yes.', 'Per-site scoping is enforced only by your click on the consent screen. `wwm verify` is not evidence about that — it is the only check that it worked.')
+      throw new Fail(EXIT.USAGE, '--no-verify requires --yes.', 'What a grant reaches is decided by your clicks on the consent screen; verify is how you see the result. Skip it and nothing has looked.')
     }
     human('')
     human(`${sym.warn} Skipped verification. Nothing has checked what this connection can actually reach.`)
@@ -1126,15 +1152,14 @@ function cmdConnect(args) {
       server: name,
       label,
       scope: 'user',
-      verified: { sites: result.sites, workspaceIds: result.workspaceIds, isolated: result.isolated, at: new Date().toISOString() },
+      verified: { sites: result.sites, workspaceIds: result.workspaceIds, singleSite: result.singleSite, at: new Date().toISOString() },
     })
   } else {
     human('')
-    if (result.isolated) human(`${sym.ok} Correctly scoped to one site: ${result.sites[0]}`)
-    else {
-      human(`${sym.warn} This connection reaches ${result.total} sites: ${result.sites.join(', ')}`)
-      human(`   That is wider than one client. Re-authorize with \`claude mcp login ${name}\` and tick only ${label}'s site.`)
-    }
+    // Whatever came back is what they authorized. Report it; the only thing
+    // worth checking is whether these are the sites they meant, and only they
+    // can answer that.
+    human(`${sym.ok} Authorized for ${describeSites(result.sites)}`)
     human('')
     // Measured on 2.1.223: a server added AND authorized mid-session became
     // callable from an already-running session with no restart. This line used
@@ -1143,7 +1168,7 @@ function cmdConnect(args) {
     human('Its tools are available now — no restart needed.')
   }
 
-  return result.isolated ? EXIT.OK : EXIT.OVERSCOPED
+  return EXIT.OK
 }
 
 function rollbackConnect(name) {
@@ -1183,7 +1208,8 @@ function cmdStatus(args) {
       statusText: s.statusText,
       sites: v?.ok ? v.sites : null,
       workspaceIds: v?.ok ? (v.workspaceIds ?? []) : [],
-      isolated: v?.ok ? v.isolated : null,
+      // Records written before 0.4.0 spelled this `isolated`.
+      singleSite: v?.ok ? (v.singleSite ?? v.isolated ?? null) : null,
       verifiedAt: v?.at ?? null,
       // ACTIVE is not an `mcp list` field: a disabled server still prints
       // "✔ Connected". It must be read from disabledMcpServers.
@@ -1212,7 +1238,7 @@ function cmdStatus(args) {
   for (const r of rows) {
     const health = { connected: sym.ok, needs_auth: '! auth', failed: sym.bad, pending_approval: '⏸ pending', unknown: '?' }[r.health] ?? '?'
     const age = r.sites === null ? '' : ` (${relativeTime(r.verifiedAt)})`
-    const sites = formatSites(r.sites, r.isolated, age, SITES_COL)
+    const sites = formatSites(r.sites, age, SITES_COL)
     human(r.server.padEnd(18) + String(r.label).slice(0, 13).padEnd(14) + health.padEnd(12) + sites.padEnd(SITES_COL) + (r.active ? sym.dot : sym.ring))
   }
 
@@ -1229,20 +1255,16 @@ function cmdStatus(args) {
   }
   if (activation.connectorsSuppressed) human(`${CONNECTOR_KEY} is on here — no claude.ai cloud connectors load in this project.`)
 
-  for (const r of rows.filter((x) => x.isolated === false)) {
-    human(`${sym.warn} ${r.server} reaches ${r.sites.length} sites — re-authorize to scope it to one`)
-  }
-
-  // Two connections in one workspace may be intentional (one client, two
-  // sites) or may mean someone believes they have isolation they do not have.
-  // Surface the fact; don't adjudicate it.
+  // Two connections in one workspace is often intentional — an agency's own
+  // workspace holding several clients' sites. State the fact without a verdict
+  // attached; the user knows their own account shape.
   const byWorkspace = new Map()
   for (const r of rows) for (const w of r.workspaceIds) {
     if (!byWorkspace.has(w)) byWorkspace.set(w, [])
     byWorkspace.get(w).push(r.server)
   }
   for (const [ws, servers] of byWorkspace) {
-    if (servers.length > 1) human(`${sym.warn} ${servers.join(' and ')} share workspace ${ws.slice(0, 8)} — not separate tenants`)
+    if (servers.length > 1) human(`${servers.join(' and ')} are in the same workspace (${ws.slice(0, 8)}).`)
   }
 
   return EXIT.OK
@@ -1580,19 +1602,18 @@ export const SITES_COL = 30
  * Render the SITES cell.
  *
  * This column used to read "1 site (just now)". That is the count, and the
- * count is the one thing `verify` can already prove on its own — what it cannot
- * prove is that the grant points at the client you meant. A correctly-isolated
- * connection authorized against the wrong site passes every check we have and
- * prints identically to a correct one. The site NAME is the only thing in the
- * whole tool that catches it, and it was being thrown away here while sitting
- * in state.json the entire time. So names go in the table even though they cost
- * width and force truncation logic.
+ * count is the least interesting thing about a grant — a connection reaching
+ * three sites is fine if those are the client's three sites, and a connection
+ * reaching one site is useless if it is the wrong one. The site NAME is what
+ * a user can actually check against their own intent, and it was being thrown
+ * away here while sitting in state.json the entire time. So names go in the
+ * table even though they cost width and force truncation logic.
  */
-export function formatSites(sites, isolated, age = '', width = SITES_COL) {
+export function formatSites(sites, age = '', width = SITES_COL) {
   if (sites === null) return 'unverified'
-  if (sites.length === 0) return `${sym.warn} none${age}`
+  if (sites.length === 0) return `none${age}`
 
-  const head = isolated ? '' : `${sym.warn} ${sites.length}: `
+  const head = sites.length > 1 ? `${sites.length}: ` : ''
   const budget = Math.max(8, width - 1 - head.length - age.length)
 
   // Drop whole names before cutting one mid-word. A clipped name reads as a
@@ -1656,7 +1677,7 @@ Global flags:
   --version     print this binary's version
 
 Exit codes: 0 ok · 2 usage · 3 preflight · 4 collision
-            5 over-scoped · 6 could not verify · 7 output parse failure
+            6 could not verify · 7 output parse failure
 `
 
 function main(argv) {
