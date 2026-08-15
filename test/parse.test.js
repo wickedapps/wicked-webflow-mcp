@@ -26,6 +26,7 @@ import {
   parseVersion,
   slugify,
   validateSlug,
+  VERSION,
 } from '../bin/wwm'
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', '2.1.223')
@@ -241,6 +242,18 @@ test('version parsing and comparison', () => {
   assert.equal(compareVersions([2, 0, 999], [2, 1, 0]), -1)
 })
 
+test('VERSION matches every published manifest', () => {
+  // npm ships only bin/wwm, so VERSION is hardcoded. A bump that forgets
+  // any of the four sites would ship a binary that lies about itself.
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..')
+  const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
+  const plugin = JSON.parse(readFileSync(join(root, '.claude-plugin', 'plugin.json'), 'utf8'))
+  const market = JSON.parse(readFileSync(join(root, '.claude-plugin', 'marketplace.json'), 'utf8'))
+  assert.equal(pkg.version, VERSION)
+  assert.equal(plugin.version, VERSION)
+  assert.equal(market.plugins[0].version, VERSION)
+})
+
 test('parseArgv separates flags, values and positionals', () => {
   const a = parseArgv(['connect', 'hatchline', '--label', 'Hatchline Studio', '--json'])
   assert.deepEqual(a.positional, ['connect', 'hatchline'])
@@ -255,6 +268,10 @@ test('parseArgv separates flags, values and positionals', () => {
   const c = parseArgv(['connect', 'x', '--no-browser', '--no-verify'])
   assert.equal(c.flags['no-browser'], true)
   assert.equal(c.flags['no-verify'], true)
+
+  const d = parseArgv(['--version'])
+  assert.equal(d.flags.version, true)
+  assert.deepEqual(d.positional, [])
 })
 
 // ---------------------------------------------------------------------------

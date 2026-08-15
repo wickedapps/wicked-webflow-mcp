@@ -21,6 +21,9 @@ export const MIN_NODE_MAJOR = 22
 export const DEFAULT_URL = 'https://mcp.webflow.com/mcp'
 export const DEFAULT_PREFIX = 'wf-'
 export const PLUGIN_ID = 'wicked-webflow-mcp'
+// npm ships only this file, so the version cannot be read from package.json.
+// Bump in lockstep with package.json, plugin.json, and marketplace.json.
+export const VERSION = '0.2.1'
 
 export const EXIT = {
   OK: 0,
@@ -547,6 +550,7 @@ function serverName(slug) { return `${prefix()}${slug}` }
 
 function preflight({ full = false } = {}) {
   const checks = []
+  checks.push({ name: 'wwm', ok: true, detail: VERSION })
   const bin = claudeBin()
   checks.push({ name: 'claude on PATH', ok: Boolean(bin), detail: bin ?? 'not found' })
   if (!bin) return { ok: false, checks }
@@ -630,6 +634,12 @@ function listServers({ refresh = false, staleSeconds = 60 } = {}) {
 // ---------------------------------------------------------------------------
 // COMMANDS
 // ---------------------------------------------------------------------------
+
+function cmdVersion() {
+  if (ctx.json) emitJson({ version: VERSION })
+  else process.stdout.write(VERSION + '\n')
+  return EXIT.OK
+}
 
 function cmdDoctor() {
   const result = preflight({ full: true })
@@ -1170,6 +1180,7 @@ const USAGE = `wwm — per-client Webflow MCP connections for Claude Code
   wwm status               health + scope + activation state
   wwm remove <slug>        logout + remove (destroys the grant)
   wwm doctor               preflight checks
+  wwm version              print this binary's version
 
 Global flags:
   --json        machine-readable stdout (human output goes to stderr)
@@ -1177,6 +1188,7 @@ Global flags:
   --yes         assume yes for confirmations
   --dry-run     print the claude commands, run none of them
   --verbose     echo every subprocess and its output
+  --version     print this binary's version
 
 Exit codes: 0 ok · 2 usage · 3 preflight · 4 collision
             5 over-scoped · 6 could not verify · 7 output parse failure
@@ -1192,9 +1204,16 @@ function main(argv) {
 
   const command = parsed.positional.shift()
 
-  if (!command || parsed.flags.help || command === 'help') {
+  if (parsed.flags.help || command === 'help') {
     process.stdout.write(USAGE)
     return command ? EXIT.OK : EXIT.USAGE
+  }
+
+  if (parsed.flags.version || command === 'version') return cmdVersion()
+
+  if (!command) {
+    process.stdout.write(USAGE)
+    return EXIT.USAGE
   }
 
   switch (command) {
