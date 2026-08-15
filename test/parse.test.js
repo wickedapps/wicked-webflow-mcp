@@ -8,15 +8,19 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, symlinkSync, unlinkSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
   SITES_COL,
+  WICKED_FILE,
   compareVersions,
   formatSites,
   isMainPath,
+  mergeDisabled,
   parseArgv,
   parseHealth,
   parseMcpGet,
@@ -24,7 +28,11 @@ import {
   parsePersistedOutput,
   parseVerifyTranscript,
   parseVersion,
+  parseWickedFile,
+  resolveActiveSet,
+  sameList,
   slugify,
+  toServerName,
   validateSlug,
   VERSION,
 } from '../bin/wwm'
@@ -308,6 +316,233 @@ test('isMainPath does not throw on a nonexistent argv[1]', () => {
   // realpath() on a deleted/renamed path throws ENOENT; the guard must fall
   // back to the literal path rather than taking down the process at startup.
   assert.equal(isMainPath('/nonexistent/path/wwm', import.meta.url), false)
+})
+
+// ---------------------------------------------------------------------------
+// activation — the differentiator, and the one with silent failure modes
+// ---------------------------------------------------------------------------
+
+test('parseWickedFile ignores comments and blank lines', () => {
+  const entries = parseWickedFile('# clients active here\n\nhatchline\r\nwf-copperfox  # the EU one\n\n')
+  assert.deepEqual(entries, ['hatchline', 'wf-copperfox'])
+})
+
+test('an empty .wicked-webflow means none, not all', () => {
+  // The file is a deliberate statement by whoever committed it. Falling back
+  // to "all" on an empty list would invert their intent while looking correct.
+  assert.deepEqual(parseWickedFile('# nothing here\n'), [])
+  const r = resolveActiveSet({ owned: ['wf-a', 'wf-b'], fileEntries: [] })
+  assert.deepEqual(r.active, [])
+  assert.equal(r.source, WICKED_FILE)
+})
+
+test('toServerName accepts a slug or a full server name', () => {
+  assert.equal(toServerName('hatchline'), 'wf-hatchline')
+  assert.equal(toServerName('wf-hatchline'), 'wf-hatchline')
+  assert.equal(toServerName('Hatchline Studio'), 'wf-hatchline-studio')
+  assert.equal(toServerName('acme', 'client-'), 'client-acme')
+})
+
+test('resolveActiveSet precedence: file, then state, then all', () => {
+  const owned = ['wf-a', 'wf-b']
+  assert.deepEqual(resolveActiveSet({ owned, fileEntries: ['a'], stateActive: ['wf-b'] }).active, ['wf-a'])
+  assert.deepEqual(resolveActiveSet({ owned, stateActive: ['wf-b'] }).active, ['wf-b'])
+  assert.deepEqual(resolveActiveSet({ owned }).active, ['wf-a', 'wf-b'])
+  assert.equal(resolveActiveSet({ owned }).source, 'default (all)')
+})
+
+test('a name in .wicked-webflow we do not manage is reported, not silently dropped', () => {
+  // A typo in a committed file otherwise looks like a working config that
+  // happens to load nothing.
+  const r = resolveActiveSet({ owned: ['wf-a'], fileEntries: ['a', 'hatchlnie'] })
+  assert.deepEqual(r.active, ['wf-a'])
+  assert.deepEqual(r.unknown, ['wf-hatchlnie'])
+})
+
+test('mergeDisabled never touches servers we do not own', () => {
+  // Users disable unrelated servers by hand via /mcp. Wiping those would be us
+  // breaking a setting nobody asked us to touch.
+  const out = mergeDisabled(['pencil', 'wf-a'], ['wf-a', 'wf-b'], ['wf-a'])
+  assert.deepEqual(out, ['pencil', 'wf-b'])
+})
+
+test('mergeDisabled is idempotent — the hook runs it every session start', () => {
+  const owned = ['wf-a', 'wf-b', 'wf-c']
+  const once = mergeDisabled(['pencil'], owned, ['wf-b'])
+  const twice = mergeDisabled(once, owned, ['wf-b'])
+  assert.deepEqual(once, twice)
+  assert.deepEqual(once, ['pencil', 'wf-a', 'wf-c'])
+})
+
+test('mergeDisabled with an empty active set disables every owned name', () => {
+  assert.deepEqual(mergeDisabled([], ['wf-a', 'wf-b'], []), ['wf-a', 'wf-b'])
+})
+
+test('mergeDisabled dedupes and drops non-strings', () => {
+  assert.deepEqual(mergeDisabled(['pencil', 'pencil', 7, null], ['wf-a'], []), ['pencil', 'wf-a'])
+  assert.deepEqual(mergeDisabled(undefined, ['wf-a'], []), ['wf-a'])
+})
+
+test('sameList compares order-sensitively', () => {
+  assert.equal(sameList(['a', 'b'], ['a', 'b']), true)
+  assert.equal(sameList(['a', 'b'], ['b', 'a']), false)
+  assert.equal(sameList(['a'], ['a', 'b']), false)
+  assert.equal(sameList(null, []), false)
+})
+
+// --- end-to-end, against throwaway files -------------------------------------
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
+const WWM = join(ROOT, 'bin', 'wwm')
+
+/** Run the real CLI against a scratch ~/.claude.json and plugin data dir. */
+function sandbox(t, { claudeJson = { projects: {} }, connections = ['wf-a', 'wf-b'] } = {}) {
+  const base = mkdtempSync(join(tmpdir(), 'wwm-test-'))
+  t.after(() => rmSync(base, { recursive: true, force: true }))
+
+  const data = join(base, 'data')
+  mkdirSync(data, { recursive: true })
+  const jsonPath = join(base, 'claude.json')
+  writeFileSync(jsonPath, JSON.stringify(claudeJson, null, 2))
+  writeFileSync(
+    join(data, 'state.json'),
+    JSON.stringify({
+      version: 1,
+      connections: Object.fromEntries(connections.map((n) => [n, { label: n, addedAt: '2026-01-01T00:00:00Z' }])),
+      projects: {},
+    })
+  )
+
+  const env = { ...process.env, WWM_CLAUDE_JSON: jsonPath, CLAUDE_PLUGIN_DATA: data }
+  return {
+    base,
+    data,
+    run: (args, opts = {}) => JSON.parse(execFileSync(process.execPath, [WWM, ...args, '--json'], { env, encoding: 'utf8', ...opts })),
+    config: () => JSON.parse(readFileSync(jsonPath, 'utf8')),
+  }
+}
+
+test('switch writes the RESOLVED cwd, not the path it was given', (t) => {
+  // The silent-success bug: write projects["/tmp/x"] when Claude Code reads
+  // projects["/private/tmp/x"] and activation appears to work while the next
+  // session loads everything. Nothing surfaces it — status reads back what we
+  // just wrote — so it needs an explicit assertion, not a smoke test.
+  const box = sandbox(t)
+  const real = join(box.base, 'project')
+  const link = join(box.base, 'link-to-project')
+  mkdirSync(real)
+  symlinkSync(real, link)
+
+  const out = box.run(['switch', 'a', '--project', link])
+  const key = realpathSync(real)
+
+  assert.notEqual(key, link, 'the fixture must actually involve a symlink')
+  assert.equal(out.cwd, key)
+  assert.ok(box.config().projects[key], `expected projects[${key}]`)
+  assert.equal(box.config().projects[link], undefined, 'the symlink path must never become a key')
+  assert.deepEqual(box.config().projects[key].disabledMcpServers, ['wf-b'])
+})
+
+test('switch preserves entries the user disabled themselves', (t) => {
+  const project = mkdtempSync(join(tmpdir(), 'wwm-proj-'))
+  t.after(() => rmSync(project, { recursive: true, force: true }))
+  const key = realpathSync(project)
+
+  const box = sandbox(t, { claudeJson: { projects: { [key]: { disabledMcpServers: ['pencil'], hasTrustDialogAccepted: true } } } })
+  box.run(['switch', 'b', '--project', project])
+
+  const entry = box.config().projects[key]
+  assert.deepEqual(entry.disabledMcpServers, ['pencil', 'wf-a'])
+  assert.equal(entry.hasTrustDialogAccepted, true, 'unrelated keys in the project entry must survive')
+})
+
+test('switch --none suppresses the claude.ai connector, and switch back restores it', (t) => {
+  const project = mkdtempSync(join(tmpdir(), 'wwm-proj-'))
+  t.after(() => rmSync(project, { recursive: true, force: true }))
+  const box = sandbox(t)
+  const settings = join(project, '.claude', 'settings.json')
+
+  // --yes is consent: the key disables every claude.ai connector in the
+  // project, so it is never written without being asked for.
+  const none = box.run(['switch', '--none', '--project', project, '--yes'])
+  assert.deepEqual(none.active, [])
+  assert.equal(none.connector, 'suppressed')
+  assert.equal(JSON.parse(readFileSync(settings, 'utf8')).disableClaudeAiConnectors, true)
+
+  const back = box.run(['switch', 'a', '--project', project])
+  assert.equal(back.connector, 'restored')
+  // `{}` is not a setting — removing the only key removes the file rather than
+  // leaving a meaningless one in the user's repo forever.
+  assert.equal(existsSync(settings), false)
+})
+
+test('switch --none keeps a settings file that has other keys in it', (t) => {
+  const project = mkdtempSync(join(tmpdir(), 'wwm-proj-'))
+  t.after(() => rmSync(project, { recursive: true, force: true }))
+  mkdirSync(join(project, '.claude'))
+  const settings = join(project, '.claude', 'settings.json')
+  writeFileSync(settings, JSON.stringify({ model: 'opus' }))
+
+  const box = sandbox(t)
+  box.run(['switch', '--none', '--project', project, '--yes'])
+  box.run(['switch', 'a', '--project', project])
+
+  assert.deepEqual(JSON.parse(readFileSync(settings, 'utf8')), { model: 'opus' })
+})
+
+test('switch leaves a connector key it did not write alone', (t) => {
+  const project = mkdtempSync(join(tmpdir(), 'wwm-proj-'))
+  t.after(() => rmSync(project, { recursive: true, force: true }))
+  mkdirSync(join(project, '.claude'))
+  writeFileSync(join(project, '.claude', 'settings.json'), JSON.stringify({ disableClaudeAiConnectors: true }))
+
+  const box = sandbox(t)
+  const out = box.run(['switch', 'a', '--project', project])
+  assert.match(out.connector, /not ours/)
+  assert.equal(JSON.parse(readFileSync(join(project, '.claude', 'settings.json'), 'utf8')).disableClaudeAiConnectors, true)
+})
+
+test('switch rejects a name it does not manage instead of writing a useless key', (t) => {
+  const box = sandbox(t)
+  assert.throws(() => box.run(['switch', 'nope', '--project', box.base]), (err) => err.status === 2)
+})
+
+test('activate reads .wicked-webflow, and it outranks plugin state', (t) => {
+  const project = mkdtempSync(join(tmpdir(), 'wwm-proj-'))
+  t.after(() => rmSync(project, { recursive: true, force: true }))
+  const key = realpathSync(project)
+  const box = sandbox(t)
+
+  box.run(['switch', 'a', '--project', project])
+  writeFileSync(join(project, WICKED_FILE), '# committed by a teammate\nb\n')
+
+  const out = box.run(['activate', '--for-cwd', '--project', project])
+  assert.equal(out.source, WICKED_FILE)
+  assert.deepEqual(out.active, ['wf-b'])
+  assert.deepEqual(box.config().projects[key].disabledMcpServers, ['wf-a'])
+})
+
+test('activate never fails the session, whatever it finds', (t) => {
+  // It runs on every single session start. A corrupt config, an unreadable
+  // state file, or a directory nobody has ever opened must all exit 0 — a hook
+  // that blocks a session is worse than one that does nothing.
+  const box = sandbox(t)
+  writeFileSync(join(box.base, 'claude.json'), '{ not json')
+
+  // execFileSync throws on a non-zero exit, so reaching the assertions at all
+  // is the exit-0 assertion.
+  const out = box.run(['activate', '--for-cwd', '--project', box.base])
+  assert.equal(out.ok, false, 'the failure is still reported, just not fatal')
+  assert.match(out.error, /could not read/)
+  assert.ok(existsSync(join(box.data, 'activate.log')))
+  assert.match(readFileSync(join(box.data, 'activate.log'), 'utf8'), /FAILED/)
+})
+
+test('activate with no connections is a no-op', (t) => {
+  const box = sandbox(t, { connections: [] })
+  const out = box.run(['activate', '--for-cwd', '--project', box.base])
+  assert.equal(out.ok, true)
+  assert.deepEqual(box.config().projects, {})
 })
 
 test('a persisted path containing spaces is captured whole', () => {

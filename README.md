@@ -43,6 +43,7 @@ From inside Claude Code:
 /wwm:connect Hatchline Studio    # register and walk you through authorizing
 /wwm:verify hatchline            # what can it actually reach?
 /wwm:status                      # everything, at a glance
+/wwm:switch hatchline            # load only this client in this project
 /wwm:remove hatchline            # end of engagement
 ```
 
@@ -69,6 +70,31 @@ Zero dependencies; that install puts the one file on your `PATH`. Requires Node 
 
 ---
 
+## Per-project activation
+
+Twenty authorized connections means twenty full tool schemas competing for the context window, and Webflow's server exposes around thirty tools. Tool search makes that survivable; it does not make it good. The value of connection 21 is negative if it degrades every session.
+
+So keep every client authorized, and load only the ones a project needs:
+
+```bash
+wwm switch hatchline           # only Hatchline loads in this directory
+wwm switch hatchline --write   # …and commit that choice as .wicked-webflow
+wwm switch --all               # everything, here
+wwm switch --none              # no Webflow connections here
+```
+
+Connections stay authorized either way. `switch` never removes anything — it writes the per-project disable list Claude Code already reads, the same one the `/mcp` menu toggles, merged so your own disabled servers keep their settings.
+
+Three things to know, all of which are consequences of how Claude Code starts:
+
+**It applies from your next session.** MCP connections are resolved and started before any hook or command can write anything, so the session you run `switch` in keeps whatever it already loaded. Start a new session to see the change.
+
+**`.wicked-webflow` is what makes it a team thing.** Commit it and a teammate who clones the repo gets the same set from their second session onward, having installed nothing and configured nothing — the plugin's `SessionStart` hook applies it for them. Their *first* session is unfiltered, because the per-project disable list lives in `~/.claude.json` and a clone cannot carry it.
+
+**`--none` is not empty until you close one hole.** With no `wf-*` connection loaded, Claude Code unhides its own `claude.ai Webflow` connector against the same URL — a different grant, scoped by nothing this plugin did. The only thing that suppresses it is `disableClaudeAiConnectors` in the project's `.claude/settings.json`, and that key is all-or-nothing: it disables *every* claude.ai connector in the project, Figma and Linear and Notion included. `wwm switch --none` explains this and asks before writing it, and `wwm status` tells you which state you are in. It is never written silently, and never by the hook.
+
+---
+
 ## What "isolated" does and does not mean
 
 This is the part worth reading slowly, because the pitch and the mechanism are not the same thing.
@@ -85,7 +111,7 @@ That asymmetry is why `wwm verify` exists and why it runs by default. It asks th
 
 **This plugin never sees your credentials.** Every connection change is made by shelling out to the `claude` CLI. Tokens live in Claude Code's keychain storage; `wwm` reads connection names and health, and nothing else.
 
-**`remove` destroys the grant.** On Claude Code 2.1.223, removing a server invalidates its stored authorization everywhere, at any scope. There is no way to remove a connection and keep its token, which is why deactivating for one project is a separate operation and not `remove`.
+**`remove` destroys the grant.** On Claude Code 2.1.223, removing a server invalidates its stored authorization everywhere, at any scope. There is no way to remove a connection and keep its token, which is why deactivating for one project is `wwm switch` and never `remove`.
 
 ---
 

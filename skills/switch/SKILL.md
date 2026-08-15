@@ -7,25 +7,29 @@ description: Choose which Webflow connections are active in this project. Use wh
 
 Make "$ARGUMENTS" the active connection(s) for this project, deactivating the rest.
 
-## Not yet implemented
+1. If you are unsure which connections exist, run `wwm status --json` first and match "$ARGUMENTS" against the labels and server names it returns.
+2. Run `wwm switch <slug>... --json`. Variants:
+   - `--all` — everything active here.
+   - `--none` — no Webflow connections here.
+   - `--write` — also write `.wicked-webflow`, so the set travels with the repo and a teammate's session picks it up. Offer this when the project is a git repo and the user is setting up a client project rather than experimenting.
+3. **Tell the user the current session is unchanged.** MCP connections are resolved and started before anything we can write, so the set applies from their *next* session. Do not imply the tools disappeared just now — they can see the old ones in the same session and will think the command failed.
+4. If the JSON reports `fileConflict: true`, say so: `.wicked-webflow` lists a different set and wins at session start, so this switch is undone next session unless they re-run with `--write`.
 
-`wwm switch` lands in M3. Running it now exits with a message saying so.
+## Deactivating everything has a catch — say it out loud
 
-Until then, the honest answer to "how do I load only this client here?" is that you cannot do it through this plugin yet. Do not improvise one.
+When no `wf-*` connection is active, Claude Code unhides its own `claude.ai Webflow` connector against the same URL. That connector is a *different* grant, scoped by nothing wwm did. So "no Webflow here" is not actually true until it is suppressed.
 
-## What you must not do as a workaround
+The only lever that suppresses it is `disableClaudeAiConnectors` in the project's `.claude/settings.json`, and it is all-or-nothing: it disables **every** claude.ai connector in that project — Figma, Linear, Notion, all of them.
 
-**Never use `wwm remove` or `claude mcp remove` to deactivate a connection.** On Claude Code 2.1.223, removing a server invalidates its stored OAuth grant globally, at every scope — not just in this project. The user would have to re-authorize through the browser, and would lose the verified-scope record for that connection.
+`wwm switch --none` asks before writing it when run in a terminal. From inside a Claude Code session there is no TTY, so:
 
-Remove is for ending an engagement. It is not a toggle, and there is no way to remove a connection and keep its token.
+- Do **not** pass `--yes` to answer that question on the user's behalf. It is a consent question about software we were never asked to touch.
+- Instead, run `wwm switch --none --json` and relay `connector: "hole open"` if that is what comes back, then ask the user directly. If they agree, re-run with `--suppress-connectors`.
 
-**Never hand-edit `disabledMcpServers` in `~/.claude.json`.** That is the mechanism `switch` will use, but it is keyed to the resolved working directory and has to merge with whatever else is already disabled there. Getting it wrong silently deactivates unrelated MCP servers for the user, in a file they are unlikely to think to check.
+The `connector` field in the JSON tells you what happened: `suppressed`, `restored`, `hole open`, `already suppressed`, or `left alone (not ours)`.
 
-## What to say instead
+## What you must not do
 
-Explain the current state with `wwm status` and let the user decide. If they want fewer Webflow tools loaded right now, the available options are:
+**Never use `wwm remove` or `claude mcp remove` to deactivate a connection.** Removing a server invalidates its stored OAuth grant globally, at every scope. Remove is for ending an engagement; `switch` is the toggle.
 
-- Work in a different project directory, if the other client's connection is already deactivated there.
-- Accept the context cost for now, and note that per-project activation is the next milestone.
-
-Both are worse than `switch`. Say so rather than dressing them up.
+**Never hand-edit `disabledMcpServers` in `~/.claude.json`.** That is the mechanism `switch` uses, but it is keyed to the *resolved* working directory and has to merge with whatever else is already disabled there. Writing the unresolved path silently no-ops — the write succeeds, status reads back what you just wrote, and the next session loads everything anyway.

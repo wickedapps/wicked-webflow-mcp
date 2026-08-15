@@ -11,7 +11,7 @@
 // filesystem, or a subprocess lives below the PARSERS section.
 
 import { spawnSync } from 'node:child_process'
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -23,7 +23,7 @@ export const DEFAULT_PREFIX = 'wf-'
 export const PLUGIN_ID = 'wicked-webflow-mcp'
 // npm ships only this file, so the version cannot be read from package.json.
 // Bump in lockstep with package.json, plugin.json, and marketplace.json.
-export const VERSION = '0.2.1'
+export const VERSION = '0.3.0'
 
 export const EXIT = {
   OK: 0,
@@ -327,6 +327,96 @@ export function validateSlug(slug) {
   return null
 }
 
+// --- activation (pure half) -------------------------------------------------
+//
+// There is no CLI for per-project enable/disable, and `disabledMcpServers` is
+// in no settings schema — its only reader is ~/.claude.json -> projects[<cwd>].
+// So activation is a surgical denylist merge, and these functions are the part
+// that decides what that list should contain.
+
+export const WICKED_FILE = '.wicked-webflow'
+
+/**
+ * Parse a `.wicked-webflow` file: one connection per line, `#` comments,
+ * blank lines ignored. Slugs and full server names are both accepted.
+ *
+ * A file that exists but lists nothing means "no Webflow connections here" —
+ * NOT "all of them". The file is a deliberate statement by whoever committed
+ * it; falling back to all would quietly invert their intent.
+ */
+export function parseWickedFile(text) {
+  const entries = []
+  for (const raw of String(text).split('\n')) {
+    // Names are [a-z0-9-], so a `#` can only ever start a comment.
+    const line = raw.replace(/#.*$/, '').trim()
+    if (line) entries.push(line)
+  }
+  return entries
+}
+
+/** `hatchline` and `wf-hatchline` both mean the same server. */
+export function toServerName(entry, pfx = DEFAULT_PREFIX) {
+  const e = String(entry).trim()
+  return e.startsWith(pfx) ? e : pfx + slugify(e)
+}
+
+/**
+ * Decide which connections should be active for a directory.
+ *
+ * Precedence: `.wicked-webflow` (committed, so a team shares it) -> the
+ * project's set in plugin state -> everything. `unknown` collects names the
+ * file asks for that we do not manage; they are reported rather than silently
+ * dropped, because a typo in a committed file otherwise looks like a working
+ * config that just happens to load nothing.
+ */
+export function resolveActiveSet({ owned, fileEntries = null, stateActive = null, pfx = DEFAULT_PREFIX }) {
+  const from = (entries, source) => {
+    const wanted = [...new Set(entries.map((e) => toServerName(e, pfx)))]
+    return {
+      active: wanted.filter((n) => owned.includes(n)),
+      unknown: wanted.filter((n) => !owned.includes(n)),
+      source,
+    }
+  }
+  if (fileEntries) return from(fileEntries, WICKED_FILE)
+  if (stateActive) return from(stateActive, 'plugin state')
+  return { active: [...owned], unknown: [], source: 'default (all)' }
+}
+
+/**
+ * Merge our intent into whatever is already in `disabledMcpServers`.
+ *
+ * The array is shared with the user's own `/mcp` toggles — someone may have
+ * disabled `pencil` by hand, and wiping that would be us breaking a setting we
+ * were never asked to touch. So: only names we own are ever added or removed,
+ * every other entry keeps its place, and the result is stable under repeated
+ * application (the SessionStart hook runs this on every single session start).
+ */
+export function mergeDisabled(existing, owned, active) {
+  const ownedSet = new Set(owned)
+  const activeSet = new Set(active)
+  const out = []
+  const seen = new Set()
+
+  for (const name of Array.isArray(existing) ? existing : []) {
+    if (typeof name !== 'string' || seen.has(name)) continue
+    if (ownedSet.has(name) && activeSet.has(name)) continue // ours, now active
+    seen.add(name)
+    out.push(name)
+  }
+  for (const name of owned) {
+    if (activeSet.has(name) || seen.has(name)) continue
+    seen.add(name)
+    out.push(name)
+  }
+  return out
+}
+
+export function sameList(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false
+  return a.every((v, i) => v === b[i])
+}
+
 // ---------------------------------------------------------------------------
 // I/O below this line.
 // ---------------------------------------------------------------------------
@@ -520,7 +610,9 @@ function scratchDir() {
   return d
 }
 
-function claudeJsonPath() { return join(homedir(), '.claude.json') }
+// Overridable so the activation tests can exercise the real write path against
+// a throwaway file instead of the developer's own config.
+function claudeJsonPath() { return process.env.WWM_CLAUDE_JSON || join(homedir(), '.claude.json') }
 
 function readClaudeJson() {
   try { return JSON.parse(readFileSync(claudeJsonPath(), 'utf8')) } catch { return null }
@@ -540,6 +632,89 @@ function disabledServersFor(dir) {
   const entry = cfg?.projects?.[resolvedCwd(dir)]
   const list = entry?.disabledMcpServers
   return Array.isArray(list) ? list : []
+}
+
+/**
+ * Write `projects.<resolved cwd>.disabledMcpServers` and nothing else.
+ *
+ * Claude Code may atomically rewrite this file during the same startup (~150ms
+ * after a SessionStart hook write), so this is a best-effort apply, not a lock:
+ * re-read immediately before writing, keep the window small, and write through
+ * a temp file + rename so a crash can never leave a truncated ~/.claude.json.
+ */
+function writeDisabledFor(dir, list) {
+  const p = claudeJsonPath()
+  const key = resolvedCwd(dir)
+
+  let cfg
+  try { cfg = JSON.parse(readFileSync(p, 'utf8')) } catch (e) {
+    return { ok: false, key, reason: `could not read ${p}: ${e.message}` }
+  }
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) {
+    return { ok: false, key, reason: `${p} is not a JSON object` }
+  }
+
+  if (!cfg.projects || typeof cfg.projects !== 'object') cfg.projects = {}
+  const entry = cfg.projects[key] && typeof cfg.projects[key] === 'object' ? cfg.projects[key] : {}
+  const before = Array.isArray(entry.disabledMcpServers) ? entry.disabledMcpServers : []
+  if (sameList(before, list)) return { ok: true, key, changed: false, before, after: list }
+  if (ctx.dryRun) return { ok: true, key, changed: true, before, after: list, dryRun: true }
+
+  entry.disabledMcpServers = list
+  cfg.projects[key] = entry
+
+  const tmp = `${p}.wwm.${process.pid}.tmp`
+  try {
+    // Claude Code writes this file with 2-space indent and no trailing
+    // newline; matching that keeps our writes out of any diff the user takes.
+    writeFileSync(tmp, JSON.stringify(cfg, null, 2))
+    renameSync(tmp, p)
+  } catch (e) {
+    try { unlinkSync(tmp) } catch { /* nothing to clean up */ }
+    return { ok: false, key, reason: `could not write ${p}: ${e.message}` }
+  }
+  return { ok: true, key, changed: true, before, after: list }
+}
+
+// --- the claude.ai connector hole -------------------------------------------
+//
+// Disable every named Webflow server and Claude Code unhides its own
+// `claude.ai Webflow` connector against the same URL, so a different grant
+// walks in through the hole. Exactly one lever closes it, and it is NOT
+// disabledMcpServers (tested: putting the display name there does nothing).
+
+const CONNECTOR_KEY = 'disableClaudeAiConnectors'
+
+function settingsPath(dir) { return join(dir, '.claude', 'settings.json') }
+
+function readSettings(dir) {
+  try { return JSON.parse(readFileSync(settingsPath(dir), 'utf8')) } catch { return null }
+}
+
+function writeSettingsKey(dir, value) {
+  const p = settingsPath(dir)
+  const current = readSettings(dir) ?? {}
+  if (value === null) {
+    if (!(CONNECTOR_KEY in current)) return { ok: true, changed: false }
+    delete current[CONNECTOR_KEY]
+  } else {
+    if (current[CONNECTOR_KEY] === value) return { ok: true, changed: false }
+    current[CONNECTOR_KEY] = value
+  }
+  if (ctx.dryRun) return { ok: true, changed: true, dryRun: true }
+  try {
+    // Removing our key can empty the file. `{}` is not a setting, and leaving
+    // it behind puts a meaningless file in the user's repo forever.
+    if (Object.keys(current).length === 0) {
+      try { unlinkSync(p) } catch { /* it may never have existed */ }
+      return { ok: true, changed: true }
+    }
+    mkdirSync(dirname(p), { recursive: true })
+    writeFileSync(p, JSON.stringify(current, null, 2) + '\n')
+  } catch (e) {
+    return { ok: false, changed: false, reason: e.message }
+  }
+  return { ok: true, changed: true }
 }
 
 function prefix() { return process.env.CLAUDE_PLUGIN_OPTION_PREFIX || DEFAULT_PREFIX }
@@ -1016,8 +1191,15 @@ function cmdStatus(args) {
     }
   })
 
+  const dir = resolvedCwd()
+  const file = readWickedFile(dir)
+  const activation = {
+    source: file ? WICKED_FILE : state.projects?.[dir]?.active ? 'plugin state' : 'default (all)',
+    connectorsSuppressed: readSettings(dir)?.[CONNECTOR_KEY] === true,
+  }
+
   if (ctx.json) {
-    emitJson({ ok: true, cwd: resolvedCwd(), servers: rows, cached: listed.cached })
+    emitJson({ ok: true, cwd: dir, servers: rows, activation, cached: listed.cached })
     return EXIT.OK
   }
 
@@ -1036,7 +1218,16 @@ function cmdStatus(args) {
 
   const activeCount = rows.filter((r) => r.active).length
   human('')
-  human(`${rows.length} connection${rows.length === 1 ? '' : 's'} · ${activeCount} active in ${resolvedCwd()}`)
+  human(`${rows.length} connection${rows.length === 1 ? '' : 's'} · ${activeCount} active in ${dir} (from ${activation.source})`)
+
+  // With nothing of ours loaded, Claude Code unhides its own Webflow
+  // connector against the same URL. That grant is not scoped by anything we
+  // did, so an empty active set is only actually empty if the key is set.
+  if (activeCount === 0 && !activation.connectorsSuppressed) {
+    human(`${sym.warn} No wwm connection is active, so "claude.ai Webflow" can load here instead — an unscoped grant.`)
+    human(`   \`wwm switch --none\` offers to close that; it disables every claude.ai connector in this project.`)
+  }
+  if (activation.connectorsSuppressed) human(`${CONNECTOR_KEY} is on here — no claude.ai cloud connectors load in this project.`)
 
   for (const r of rows.filter((x) => x.isolated === false)) {
     human(`${sym.warn} ${r.server} reaches ${r.sites.length} sites — re-authorize to scope it to one`)
@@ -1073,7 +1264,7 @@ function cmdRemove(args) {
       EXIT.USAGE,
       `This will remove ${name} and destroy its Webflow authorization.`,
       'Removing a server invalidates its stored grant everywhere — there is no way to remove it and keep the token.\n' +
-        'To deactivate a connection for one project without losing the grant, use `wwm switch` (M3) instead.\n' +
+        'To deactivate a connection for one project without losing the grant, use `wwm switch` instead.\n' +
         `Re-run with --yes to proceed.`
     )
   }
@@ -1100,6 +1291,277 @@ function cmdRemove(args) {
   }
 
   return steps.every((s) => s.ok) ? EXIT.OK : EXIT.GENERIC
+}
+
+// --- activation --------------------------------------------------------------
+
+/**
+ * The connections wwm manages. Removed ones are kept in state.json so a re-add
+ * restores the label, but they no longer exist as servers — disabling a name
+ * that is not configured is harmless noise in someone else's config file.
+ */
+function ownedNames(state) {
+  return Object.entries(state.connections)
+    .filter(([name, conn]) => name.startsWith(prefix()) && !conn?.removedAt)
+    .map(([name]) => name)
+}
+
+function readWickedFile(dir) {
+  const p = join(dir, WICKED_FILE)
+  try { return { path: p, entries: parseWickedFile(readFileSync(p, 'utf8')) } } catch { return null }
+}
+
+/**
+ * Apply an active set to a directory: the disabledMcpServers merge, plus the
+ * connector suppression that has to accompany an empty set.
+ *
+ * `suppress` is a decision made by the caller, never here — the connector key
+ * disables EVERY claude.ai cloud connector in the project (Figma, Linear,
+ * whatever the user has), so writing it is a consent question, and the hook
+ * has nobody to ask.
+ */
+function applyActivation(dir, active, owned, { suppress = 'skip' } = {}) {
+  const disabled = mergeDisabled(disabledServersFor(dir), owned, active)
+  const write = writeDisabledFor(dir, disabled)
+
+  let connector = { changed: false, state: 'untouched' }
+  const settings = readSettings(dir)
+  const already = settings?.[CONNECTOR_KEY] === true
+
+  if (active.length === 0 && suppress === 'on' && !already) {
+    const res = writeSettingsKey(dir, true)
+    connector = { ...res, state: res.ok ? 'suppressed' : 'failed' }
+  } else if (active.length > 0 && already && suppress !== 'keep') {
+    // Only ever undo suppression we are responsible for. If the user put the
+    // key there themselves, removing it turns their connectors back on behind
+    // their back — the same silent-write sin in the other direction.
+    const state = loadState()
+    if (state.projects?.[resolvedCwd(dir)]?.suppressedConnectors) {
+      const res = writeSettingsKey(dir, null)
+      connector = { ...res, state: res.ok ? 'restored' : 'failed' }
+    } else {
+      connector = { changed: false, state: 'left alone (not ours)' }
+    }
+  } else if (already) {
+    connector = { changed: false, state: 'already suppressed' }
+  } else if (active.length === 0) {
+    connector = { changed: false, state: 'hole open' }
+  }
+
+  return { disabled, write, connector }
+}
+
+const SWITCH_USAGE = `Usage: wwm switch <slug>... | --all | --none  [--write] [--project <path>]
+
+  --write   also record the set in ${WICKED_FILE} so it travels with the repo`
+
+function cmdSwitch(args) {
+  // Deliberately no preflight: switch runs no subprocess and touches no
+  // credential. Refusing to edit a JSON file because `claude` is not on PATH
+  // would be gratuitous.
+  const dir = resolvedCwd(args.flags.project ?? process.cwd())
+  const state = loadState()
+  const owned = ownedNames(state)
+
+  if (owned.length === 0) throw new Fail(EXIT.USAGE, 'No wwm-managed connections yet.', 'Run `wwm connect <client>` first.')
+
+  let active
+  if (args.flags.none) active = []
+  else if (args.flags.all) active = [...owned]
+  else if (args.positional.length > 0) {
+    const wanted = args.positional.map((s) => toServerName(s, prefix()))
+    const unknown = wanted.filter((n) => !owned.includes(n))
+    if (unknown.length) {
+      throw new Fail(
+        EXIT.USAGE,
+        `Not a connection wwm manages: ${unknown.join(', ')}`,
+        `Known: ${owned.join(', ')}\n\n${SWITCH_USAGE}`
+      )
+    }
+    active = wanted
+  } else {
+    throw new Fail(EXIT.USAGE, 'Nothing to switch to.', SWITCH_USAGE)
+  }
+
+  // The connector question, asked before anything is written.
+  let suppress = 'skip'
+  if (active.length === 0) {
+    if (args.flags['suppress-connectors'] === false) suppress = 'skip'
+    else if (args.flags['suppress-connectors'] === true || ctx.yes || args.flags.yes) suppress = 'on'
+    else if (canPrompt()) suppress = askAboutConnector(dir) ? 'on' : 'skip'
+  }
+
+  const result = applyActivation(dir, active, owned, { suppress })
+
+  state.projects = state.projects ?? {}
+  state.projects[dir] = {
+    ...(state.projects[dir] ?? {}),
+    active,
+    at: new Date().toISOString(),
+    suppressedConnectors: result.connector.state === 'suppressed'
+      ? true
+      : result.connector.state === 'restored'
+        ? false
+        : (state.projects[dir]?.suppressedConnectors ?? false),
+  }
+  saveState(state)
+
+  let wroteFile = null
+  if (args.flags.write) {
+    wroteFile = writeWickedFile(dir, active)
+  }
+
+  const file = readWickedFile(dir)
+  const fileConflict = file && !args.flags.write &&
+    !sameList([...new Set(file.entries.map((e) => toServerName(e, prefix())))].filter((n) => owned.includes(n)), active)
+
+  if (ctx.json) {
+    emitJson({
+      ok: result.write.ok,
+      cwd: dir,
+      active,
+      disabled: result.disabled,
+      connector: result.connector.state,
+      wroteFile,
+      fileConflict: Boolean(fileConflict),
+      restartRequired: true,
+      error: result.write.ok ? null : result.write.reason,
+    })
+    return result.write.ok ? EXIT.OK : EXIT.GENERIC
+  }
+
+  if (!result.write.ok) throw new Fail(EXIT.GENERIC, 'Could not apply the activation set.', result.write.reason)
+
+  human(`${sym.ok} ${active.length === 0 ? 'No Webflow connections' : active.join(', ')} active in ${dir}`)
+  if (result.disabled.length) human(`  disabled here: ${result.disabled.join(', ')}`)
+  if (wroteFile) human(`  wrote ${WICKED_FILE} — commit it and teammates get the same set`)
+  reportConnector(result.connector, active)
+
+  if (fileConflict) {
+    human('')
+    human(`${sym.warn} ${WICKED_FILE} lists a different set, and it wins at session start.`)
+    human(`   This switch will be undone next session. Re-run with --write to update the file.`)
+  }
+
+  human('')
+  // MCP connections are resolved and started BEFORE any hook or CLI write can
+  // land, so the session you are in already loaded what it loaded.
+  human('This session is unchanged — start a new session for this set to load.')
+  return EXIT.OK
+}
+
+function writeWickedFile(dir, active) {
+  const p = join(dir, WICKED_FILE)
+  const body = [
+    '# Webflow MCP connections active in this project (wwm switch --write).',
+    '# One per line. Commit this file and teammates get the same set.',
+    '# An empty list means: no Webflow connections here.',
+    ...active,
+    '',
+  ].join('\n')
+  if (ctx.dryRun) return p
+  try { writeFileSync(p, body) } catch (e) {
+    human(`${sym.warn} could not write ${p}: ${e.message}`)
+    return null
+  }
+  return p
+}
+
+/** The one write in this tool that affects software we were never asked about. */
+function askAboutConnector(dir) {
+  human('')
+  human(`${sym.warn} With no Webflow connection active, Claude Code unhides its own`)
+  human(`   "claude.ai Webflow" connector against the same URL — so a different,`)
+  human(`   unscoped grant can reach your sites from this project anyway.`)
+  human('')
+  human(`   The only thing that closes that is "${CONNECTOR_KEY}": true in`)
+  human(`   ${settingsPath(dir)}, and it is all-or-nothing:`)
+  human(`   it disables EVERY claude.ai connector here (Figma, Linear, Notion — all of them).`)
+  human('')
+  const answer = promptLine('   Write it? [y/N] ')
+  return /^y(es)?$/i.test(String(answer ?? '').trim())
+}
+
+function reportConnector(connector, active) {
+  switch (connector.state) {
+    case 'suppressed':
+      human(`  ${sym.ok} wrote ${CONNECTOR_KEY} — every claude.ai connector is off in this project`)
+      break
+    case 'restored':
+      human(`  ${sym.ok} removed ${CONNECTOR_KEY} — your other claude.ai connectors work here again`)
+      break
+    case 'hole open':
+      human(`  ${sym.warn} "claude.ai Webflow" can still load here — that grant is not scoped by wwm`)
+      break
+    case 'failed':
+      human(`  ${sym.bad} could not update ${CONNECTOR_KEY}: ${connector.reason}`)
+      break
+    case 'left alone (not ours)':
+      if (active.length > 0) human(`  ${sym.warn} ${CONNECTOR_KEY} is set here and wwm did not set it — leaving it alone`)
+      break
+  }
+}
+
+/**
+ * SessionStart hook entry point. Runs on EVERY session start, so: no network,
+ * no subprocess, no prompt, and never fatal — a failure here must not block
+ * the user's session. Everything lands in the log and we exit 0 regardless.
+ */
+function cmdActivate(args) {
+  const dir = resolvedCwd(args.flags.project ?? process.cwd())
+  const log = (msg) => {
+    try { appendFileSync(join(stateDir(), 'activate.log'), `${new Date().toISOString()} ${dir} ${msg}\n`) } catch { /* best effort */ }
+  }
+
+  // Every path below reports through this, including the failures — `--json`
+  // callers get parseable output whatever happened, and the exit code stays 0.
+  const out = { ok: true, cwd: dir, source: null, active: [], disabled: [], unknown: [], changed: false, error: null }
+
+  try {
+    const state = loadState()
+    const owned = ownedNames(state)
+    if (owned.length === 0) {
+      log('no owned connections; nothing to do')
+      out.source = 'nothing to do'
+    } else {
+      const file = readWickedFile(dir)
+      const resolved = resolveActiveSet({
+        owned,
+        fileEntries: file ? file.entries : null,
+        stateActive: state.projects?.[dir]?.active ?? null,
+        pfx: prefix(),
+      })
+
+      // The hook never writes the connector key — that decision disables other
+      // vendors' connectors and belongs to a human running `wwm switch --none`.
+      const result = applyActivation(dir, resolved.active, owned, { suppress: 'keep' })
+
+      Object.assign(out, {
+        source: resolved.source,
+        active: resolved.active,
+        disabled: result.disabled,
+        unknown: resolved.unknown,
+        changed: result.write.changed === true,
+        ok: result.write.ok,
+        error: result.write.ok ? null : result.write.reason,
+      })
+
+      if (!result.write.ok) log(`FAILED: ${result.write.reason}`)
+      else {
+        log(`source=${resolved.source} active=[${resolved.active.join(' ')}] disabled=[${result.disabled.join(' ')}]${result.write.changed ? '' : ' (no change)'}`)
+        if (resolved.unknown.length) log(`WARN unknown in ${resolved.source}: ${resolved.unknown.join(' ')}`)
+        if (!ctx.json && result.write.changed) human(`wwm: ${resolved.active.length} Webflow connection(s) active here from next session (${resolved.source})`)
+      }
+    }
+  } catch (e) {
+    log(`ERROR ${e?.message ?? e}`)
+    out.ok = false
+    out.error = String(e?.message ?? e)
+  }
+
+  if (ctx.json) emitJson(out)
+  // Always 0. A hook that blocks a session is worse than one that does nothing.
+  return EXIT.OK
 }
 
 // --- helpers ----------------------------------------------------------------
@@ -1178,6 +1640,9 @@ const USAGE = `wwm — per-client Webflow MCP connections for Claude Code
   wwm connect [<slug>]     add + authorize + verify, one flow (asks if no slug)
   wwm verify [<slug>]      headless scope check (no slug = --all)
   wwm status               health + scope + activation state
+  wwm switch <slug>...     set the connections active in this project
+                           (--all | --none | --write to commit the set)
+  wwm activate --for-cwd   apply this project's set (the SessionStart hook)
   wwm remove <slug>        logout + remove (destroys the grant)
   wwm doctor               preflight checks
   wwm version              print this binary's version
@@ -1222,9 +1687,8 @@ function main(argv) {
     case 'verify': return cmdVerify(parsed)
     case 'status': return cmdStatus(parsed)
     case 'remove': return cmdRemove(parsed)
-    case 'switch':
-    case 'activate':
-      throw new Fail(EXIT.USAGE, `\`wwm ${command}\` is not implemented yet (M3).`, 'Connections are all active by default until then.')
+    case 'switch': return cmdSwitch(parsed)
+    case 'activate': return cmdActivate(parsed)
     default:
       throw new Fail(EXIT.USAGE, `Unknown command: ${command}`, USAGE)
   }
