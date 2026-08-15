@@ -9,7 +9,7 @@
       "displayName": "Wicked Webflow MCP",
       "description": "Keep every client's Webflow MCP connection live at once, and load only the ones each project needs.",
       "source": "./",
-      "version": "0.5.0",
+      "version": "0.5.1",
       "license": "ISC",
       "keywords": ["webflow", "mcp", "agency", "multi-tenant", "oauth"]
     }

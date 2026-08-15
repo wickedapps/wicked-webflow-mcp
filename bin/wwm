@@ -24,7 +24,7 @@ export const DEFAULT_PREFIX = 'wf-'
 export const PLUGIN_ID = 'wicked-webflow-mcp'
 // npm ships only this file, so the version cannot be read from package.json.
 // Bump in lockstep with package.json, plugin.json, and marketplace.json.
-export const VERSION = '0.5.0'
+export const VERSION = '0.5.1'
 
 export const EXIT = {
   OK: 0,
@@ -120,7 +120,7 @@ export function parseMcpList(text) {
 /**
  * Parse `claude mcp get <name>`:
  *
- *   wf-hatchline:
+ *   wf-dino:
  *     Scope: User config (available in all your projects)
  *     Status: ✔ Connected
  *     Type: http
@@ -324,7 +324,7 @@ export function slugify(input) {
 export const SLUG_RE = /^[a-z0-9][a-z0-9-]*$/
 
 /**
- * Server names become tool-name prefixes (`mcp__wf-hatchline__*`), so every
+ * Server names become tool-name prefixes (`mcp__wf-dino__*`), so every
  * character is paid for in every tool name in every session, and anything
  * outside [A-Za-z0-9_-] gets mangled.
  */
@@ -362,7 +362,7 @@ export function parseWickedFile(text) {
   return entries
 }
 
-/** `hatchline` and `wf-hatchline` both mean the same server. */
+/** `dino` and `wf-dino` both mean the same server. */
 export function toServerName(entry, pfx = DEFAULT_PREFIX) {
   const e = String(entry).trim()
   return e.startsWith(pfx) ? e : pfx + slugify(e)
@@ -1638,7 +1638,7 @@ function pickConnectionsToVerify(state) {
   return chosen.cancelled ? null : chosen.indexes.map((i) => owned[i])
 }
 
-/** "1 site — Hatchline" / "3 sites — Hatchline, Hatchline EU, Staging" */
+/** "1 site — Dino" / "3 sites — Dino, Dino EU, Staging" */
 function describeSites(sites) {
   const list = Array.isArray(sites) ? sites : []
   if (list.length === 0) return 'no sites'

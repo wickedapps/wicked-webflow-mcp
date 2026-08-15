@@ -1,6 +1,6 @@
 Checking MCP server health…
 
-wf-hatchline: https://mcp.webflow.com/mcp - ✔ Connected
+wf-dino: https://mcp.webflow.com/mcp - ✔ Connected
 wf-northgate: https://mcp.webflow.com/mcp - ! Needs authentication
 wf-oldclient: https://mcp.webflow.com/mcp - ✘ Failed to connect
 wf-teamrepo: https://mcp.webflow.com/mcp - ⏸ Pending approval

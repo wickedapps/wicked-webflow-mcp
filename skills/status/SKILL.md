@@ -17,8 +17,8 @@ The front door. Show every connection, its health, its verified scope, whether i
 
 | | connection | client | reaches | checked |
 | --- | --- | --- | --- | --- |
-| ● | `wf-hatchline` | Hatchline Studio | Hatchline | 2d ago |
-| ○ | `wf-copperfox` | Copper & Fox | C&F, C&F EU, C&F Staging | 5d ago |
+| ● | `wf-dino` | Dino Studios | Dino | 2d ago |
+| ○ | `wf-stonesboots` | Stones & Boots | S&B, S&B EU, S&B Staging | 5d ago |
 | ○ | `wf-northgate` | Northgate | — | never |
 
 `●` = active in this project, `○` = authorized but not loaded here. That distinction is the whole point of the plugin; do not flatten it into one list. Say where the activation came from — `activation.source` is `.wicked-webflow`, `plugin state`, or `default (all)` — and if it is `.wicked-webflow`, mention teammates get the same set.

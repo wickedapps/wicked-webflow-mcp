@@ -246,11 +246,11 @@ test('parsePersistedOutput extracts the path', () => {
 // ---------------------------------------------------------------------------
 
 test('slugify and validateSlug enforce the tool-name charset', () => {
-  assert.equal(slugify('Hatchline Studio'), 'hatchline-studio')
-  assert.equal(slugify('  Copper & Fox!! '), 'copper-fox')
+  assert.equal(slugify('Dino Studios'), 'dino-studios')
+  assert.equal(slugify('  Stones & Boots!! '), 'stones-boots')
   assert.equal(slugify('ACME_Corp'), 'acme-corp')
 
-  assert.equal(validateSlug('hatchline'), null)
+  assert.equal(validateSlug('dino'), null)
   assert.equal(validateSlug('a1-b2'), null)
   assert.match(validateSlug(''), /empty/)
   assert.match(validateSlug('-leading'), /must match/)
@@ -280,9 +280,9 @@ test('VERSION matches every published manifest', () => {
 })
 
 test('parseArgv separates flags, values and positionals', () => {
-  const a = parseArgv(['connect', 'hatchline', '--label', 'Hatchline Studio', '--json'])
-  assert.deepEqual(a.positional, ['connect', 'hatchline'])
-  assert.equal(a.flags.label, 'Hatchline Studio')
+  const a = parseArgv(['connect', 'dino', '--label', 'Dino Studios', '--json'])
+  assert.deepEqual(a.positional, ['connect', 'dino'])
+  assert.equal(a.flags.label, 'Dino Studios')
   assert.equal(a.flags.json, true)
 
   const b = parseArgv(['verify', '--max-age=24h', '--print-command'])
@@ -342,7 +342,7 @@ test('isMainPath does not throw on a nonexistent argv[1]', () => {
 test('formatSites states the facts without editorialising', () => {
   // A multi-site grant used to print a ⚠ here. It is a normal authorization —
   // the cell reports what the connection reaches and lets the user judge it.
-  assert.equal(formatSites(['Hatchline'], ' (2h ago)'), 'Hatchline (2h ago)')
+  assert.equal(formatSites(['Dino'], ' (2h ago)'), 'Dino (2h ago)')
   assert.equal(formatSites(['A', 'B', 'C'], ''), '3: A, B, C')
   assert.ok(!formatSites(['A', 'B', 'C'], '').includes('⚠'))
   assert.equal(formatSites(null), 'unverified')
@@ -352,7 +352,7 @@ test('formatSites states the facts without editorialising', () => {
 test('formatSites drops whole names rather than clipping one', () => {
   // A clipped name reads as a different site, and telling two sites apart is
   // the entire reason this cell prints names at all.
-  const out = formatSites(['Hatchline Marketing', 'Hatchline Market Research'], '', SITES_COL)
+  const out = formatSites(['Dino Marketing', 'Dino Market Research'], '', SITES_COL)
   assert.ok(out.length <= SITES_COL, `"${out}" is ${out.length} wide, budget ${SITES_COL}`)
   assert.match(out, /\+1$/)
 })
@@ -362,8 +362,8 @@ test('formatSites drops whole names rather than clipping one', () => {
 // ---------------------------------------------------------------------------
 
 test('parseWickedFile ignores comments and blank lines', () => {
-  const entries = parseWickedFile('# clients active here\n\nhatchline\r\nwf-copperfox  # the EU one\n\n')
-  assert.deepEqual(entries, ['hatchline', 'wf-copperfox'])
+  const entries = parseWickedFile('# clients active here\n\ndino\r\nwf-stonesboots  # the EU one\n\n')
+  assert.deepEqual(entries, ['dino', 'wf-stonesboots'])
 })
 
 test('an empty .wicked-webflow means none, not all', () => {
@@ -376,9 +376,9 @@ test('an empty .wicked-webflow means none, not all', () => {
 })
 
 test('toServerName accepts a slug or a full server name', () => {
-  assert.equal(toServerName('hatchline'), 'wf-hatchline')
-  assert.equal(toServerName('wf-hatchline'), 'wf-hatchline')
-  assert.equal(toServerName('Hatchline Studio'), 'wf-hatchline-studio')
+  assert.equal(toServerName('dino'), 'wf-dino')
+  assert.equal(toServerName('wf-dino'), 'wf-dino')
+  assert.equal(toServerName('Dino Studios'), 'wf-dino-studios')
   assert.equal(toServerName('acme', 'client-'), 'client-acme')
 })
 

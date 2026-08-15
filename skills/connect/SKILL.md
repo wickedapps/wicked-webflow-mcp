@@ -19,7 +19,7 @@ Connect the client named "$ARGUMENTS" as its own named Webflow MCP connection.
 
 ## Steps
 
-1. Derive a slug from "$ARGUMENTS": lowercase, spaces and punctuation to hyphens. `Hatchline Studio` → `hatchline-studio`.
+1. Derive a slug from "$ARGUMENTS": lowercase, spaces and punctuation to hyphens. `Dino Studios` → `dino-studios`.
 2. Run `wwm connect <slug> --label "$ARGUMENTS" --print-command --json`.
 3. **Brief the user on the consent screens before they open the browser.** These clicks decide what the connection can reach and you cannot make them for the user. There are two screens:
 

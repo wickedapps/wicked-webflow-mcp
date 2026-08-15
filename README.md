@@ -17,8 +17,8 @@ The workaround people land on — approve every site in one grant — means ever
 Claude Code keys MCP servers by **name**, not URL. Register the same Webflow endpoint under twenty different names and you get twenty independent OAuth grants, each with its own token, each live simultaneously:
 
 ```
-wf-hatchline    → https://mcp.webflow.com/mcp   (authorized for Hatchline's site)
-wf-copperfox    → https://mcp.webflow.com/mcp   (authorized for Copper & Fox's site)
+wf-dino         → https://mcp.webflow.com/mcp   (authorized for Dino Studios' site)
+wf-stonesboots  → https://mcp.webflow.com/mcp   (authorized for Stones & Boots' site)
 wf-northgate    → https://mcp.webflow.com/mcp   (authorized for Northgate's site)
 ```
 
@@ -40,11 +40,11 @@ Requires Claude Code **2.1.186+** and Node **22+**. Run `wwm doctor` to check.
 From inside Claude Code:
 
 ```
-/wwm:connect Hatchline Studio    # register and walk you through authorizing
-/wwm:verify hatchline            # what can it actually reach?
-/wwm:status                      # everything, at a glance
-/wwm:switch hatchline            # load only this client in this project
-/wwm:remove hatchline            # end of engagement
+/wwm:connect Dino Studios     # register and walk you through authorizing
+/wwm:verify dino              # what can it actually reach?
+/wwm:status                   # everything, at a glance
+/wwm:switch dino              # load only this client in this project
+/wwm:remove dino              # end of engagement
 ```
 
 **Authorizing has one step Claude Code cannot do for you.** `claude mcp login` opens a browser and needs a real terminal; the agent's shell does not have one. So `/wwm:connect` registers the connection, briefs you on the consent screen, and hands you a `claude mcp login wf-<slug>` line to paste into your own terminal. That is the design, not a limitation being worked around — the one irreducibly human step stays with the human.
@@ -62,10 +62,10 @@ npm install -g wicked-webflow-mcp
 Run `wwm` with no arguments and you get a dashboard and a menu:
 
 ```
-  wwm 0.5.0                                  ~/work/hatchline-site
+  wwm 0.5.1                                  ~/work/dino-site
 
-  ●  wf-hatchline   Hatchline Studio   1 site · Hatchline              2d ago
-  ○  wf-copperfox   Copper & Fox       3 sites · C&F, C&F EU, +1       5d ago
+  ●  wf-dino        Dino Studios       1 site · Dino                   2d ago
+  ○  wf-stonesboots Stones & Boots     3 sites · S&B, S&B EU, +1       5d ago
   ○  wf-northgate   Northgate          never checked
 
   1 of 3 active here · from .wicked-webflow
@@ -84,14 +84,14 @@ Run `wwm` with no arguments and you get a dashboard and a menu:
 
 `●` is active in this project, `○` is authorized but not loaded here. When something needs attention — a `.wicked-webflow` that will undo your last switch, an unverified connection, the connector hole below — the dashboard leads with it and the fix becomes the first row.
 
-Every command still works with arguments, and every interactive action prints the command that would have done it (`→ wwm switch hatchline --write`), so the menu is training wheels rather than a dependency:
+Every command still works with arguments, and every interactive action prints the command that would have done it (`→ wwm switch dino --write`), so the menu is training wheels rather than a dependency:
 
 ```bash
-wwm connect hatchline --label "Hatchline Studio"
-wwm verify hatchline
+wwm connect dino --label "Dino Studios"
+wwm verify dino
 wwm status
-wwm switch hatchline --write
-wwm remove hatchline --yes
+wwm switch dino --write
+wwm remove dino --yes
 ```
 
 Three of them open a picker when you leave the arguments off:
@@ -113,10 +113,10 @@ Twenty authorized connections means twenty full tool schemas competing for the c
 So keep every client authorized, and load only the ones a project needs:
 
 ```bash
-wwm switch hatchline           # only Hatchline loads in this directory
-wwm switch hatchline --write   # …and commit that choice as .wicked-webflow
-wwm switch --all               # everything, here
-wwm switch --none              # no Webflow connections here
+wwm switch dino           # only Dino Studios loads in this directory
+wwm switch dino --write   # …and commit that choice as .wicked-webflow
+wwm switch --all          # everything, here
+wwm switch --none         # no Webflow connections here
 ```
 
 Connections stay authorized either way. `switch` never removes anything — it writes the per-project disable list Claude Code already reads, the same one the `/mcp` menu toggles, merged so your own disabled servers keep their settings.
@@ -145,7 +145,7 @@ This is the part worth reading slowly, because the pitch and the mechanism are n
 
 **`wwm verify` shows you what a connection actually reaches**, by asking the live connection rather than trusting anyone's assumptions — including ours. It runs by default after `connect`, and `--no-verify` requires `--yes`, because a connection nothing has ever checked is an unknown rather than a clean one.
 
-**It reports which sites, and cannot know which you meant.** A connection labeled `hatchline` authorized against a scratch site verifies cleanly. That is why `wwm status` prints site names rather than a count — reading the names is the only thing that catches a grant pointed at the wrong target.
+**It reports which sites, and cannot know which you meant.** A connection labeled `dino` authorized against a scratch site verifies cleanly. That is why `wwm status` prints site names rather than a count — reading the names is the only thing that catches a grant pointed at the wrong target.
 
 **Scoping limits which sites, never what can be done to them.** Within an authorized site the grant covers Designer-API element creation, CMS writes, style and custom-code changes, and asset management. "Scoped to this client" does not mean read-only, restricted, or safe. It means a mistake is confined to that client's sites instead of every client you have.
 
