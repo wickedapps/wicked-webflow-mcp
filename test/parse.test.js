@@ -16,12 +16,25 @@ import { fileURLToPath } from 'node:url'
 
 import {
   SITES_COL,
+  VERIFY_STALE_MS,
   WICKED_FILE,
+  applyKey,
   compareVersions,
+  dashboardProblems,
+  decodeKey,
+  describeVerification,
   formatSites,
+  initPicker,
   isMainPath,
+  menuItems,
   mergeDisabled,
+  mutatesServerList,
   parseArgv,
+  pickedIndexes,
+  renderPicker,
+  switchArgv,
+  verifyCost,
+  verifyPlan,
   parseHealth,
   parseMcpGet,
   parseMcpList,
@@ -576,4 +589,374 @@ test('a persisted path containing spaces is captured whole', () => {
   // for anyone whose home directory has a space in it.
   const p = parsePersistedOutput('<persisted-output>\nOutput too large (60.8KB). Full output saved to: /Users/me/My Projects/x.json\n\nPreview:\n</persisted-output>')
   assert.equal(p.path, '/Users/me/My Projects/x.json')
+})
+
+// --- the mcp list cache ------------------------------------------------------
+
+test('mutatesServerList recognises everything that changes the list', () => {
+  for (const sub of ['add', 'remove', 'login', 'logout']) {
+    assert.equal(mutatesServerList(['mcp', sub, 'wf-a']), true, `mcp ${sub} changes the list`)
+  }
+  // Reads must not drop the cache, or the dashboard health-checks every server
+  // on every menu redraw and the cache stops being a cache.
+  assert.equal(mutatesServerList(['mcp', 'list']), false)
+  assert.equal(mutatesServerList(['mcp', 'get', 'wf-a']), false)
+  assert.equal(mutatesServerList(['--version']), false)
+  assert.equal(mutatesServerList(['-p', 'call data_sites_tool']), false)
+  assert.equal(mutatesServerList([]), false)
+  assert.equal(mutatesServerList(undefined), false)
+})
+
+test('removing a connection drops the list cache', (t) => {
+  // Reported from a real run: after `remove`, the menu redrew from a 60s-old
+  // snapshot and still listed the connection that had just been destroyed.
+  // Pressing `r` fixed it, which is exactly the tell for a stale cache.
+  const base = mkdtempSync(join(tmpdir(), 'wwm-cache-'))
+  t.after(() => rmSync(base, { recursive: true, force: true }))
+
+  const data = join(base, 'data')
+  mkdirSync(data, { recursive: true })
+  writeFileSync(join(data, 'state.json'), JSON.stringify({
+    version: 1,
+    connections: { 'wf-a': { label: 'A', addedAt: '2026-01-01T00:00:00Z' } },
+    projects: {},
+  }))
+
+  // A stub `claude` so no real CLI, network or credential is involved.
+  const stub = join(base, 'claude')
+  writeFileSync(stub, '#!/bin/sh\ncase "$1" in\n  --version) echo "2.1.223 (Claude Code)" ;;\nesac\nexit 0\n', { mode: 0o755 })
+
+  const cache = join(data, 'mcp-list-cache.json')
+  writeFileSync(cache, JSON.stringify({
+    at: Date.now(),
+    data: { servers: [{ name: 'wf-a', target: 'https://mcp.webflow.com/mcp', health: 'connected', statusText: '✔ Connected', raw: '' }], unparsed: [], ok: true },
+  }))
+  assert.ok(existsSync(cache), 'the fixture must start with a warm cache')
+
+  execFileSync(process.execPath, [WWM, 'remove', 'wf-a', '--yes', '--json'], {
+    env: {
+      ...process.env,
+      WWM_CLAUDE_BIN: stub,
+      WWM_CLAUDE_JSON: join(base, 'claude.json'),
+      CLAUDE_PLUGIN_DATA: data,
+    },
+    encoding: 'utf8',
+  })
+
+  assert.equal(existsSync(cache), false, 'the next read must go to `claude mcp list`, not to a snapshot taken before the removal')
+})
+
+// ---------------------------------------------------------------------------
+// interactive kernel
+//
+// The picker is a pure state machine wrapped in a read loop, so a key script
+// exercises everything that decides what the user sees. Only the loop that
+// gets bytes and the writes that paint them are untested here, and neither
+// makes a decision.
+// ---------------------------------------------------------------------------
+
+/** Drive a picker with a key script, the way the read loop would. */
+function drive(state, keys) {
+  for (const k of keys) {
+    state = applyKey(state, typeof k === 'string' ? { name: k } : k)
+    if (state.done || state.cancelled || state.action) break
+  }
+  return state
+}
+
+const char = (c) => ({ name: 'char', char: c })
+
+test('decodeKey reads arrows as whole escape sequences', () => {
+  // The load-bearing detail: a Down arrow arrives as ONE 3-byte read, so a
+  // lone 0x1b is unambiguously Escape and no disambiguation timer is needed.
+  assert.deepEqual(decodeKey([0x1b, 0x5b, 0x41]), { name: 'up' })
+  assert.deepEqual(decodeKey([0x1b, 0x5b, 0x42]), { name: 'down' })
+  assert.deepEqual(decodeKey([0x1b]), { name: 'esc' })
+
+  // Application-cursor mode (ESC O A) is not exotic — tmux copy-mode, less,
+  // and some ssh sessions all produce it.
+  assert.deepEqual(decodeKey([0x1b, 0x4f, 0x41]), { name: 'up' })
+})
+
+test('decodeKey maps the control keys a picker needs', () => {
+  assert.deepEqual(decodeKey([0x03]), { name: 'ctrl-c' })
+  assert.deepEqual(decodeKey([0x0d]), { name: 'enter' })
+  assert.deepEqual(decodeKey([0x0a]), { name: 'enter' })
+  assert.deepEqual(decodeKey([0x20]), { name: 'space' })
+  assert.deepEqual(decodeKey([0x7f]), { name: 'backspace' })
+  assert.deepEqual(decodeKey([]), { name: 'none' })
+  assert.deepEqual(decodeKey([0x61]), { name: 'char', char: 'a' })
+})
+
+test('decodeKey does not mistake a multi-byte character for a control key', () => {
+  assert.deepEqual(decodeKey(Buffer.from('é', 'utf8')), { name: 'char', char: 'é' })
+})
+
+const THREE = [{ label: 'wf-a' }, { label: 'wf-b' }, { label: 'wf-c' }]
+
+test('the cursor wraps at both ends', () => {
+  const up = drive(initPicker({ items: THREE }), ['up'])
+  assert.equal(up.cursor, 2, 'up from the first row lands on the last')
+  const down = drive(initPicker({ items: THREE, cursor: 2 }), ['down'])
+  assert.equal(down.cursor, 0)
+})
+
+test('space toggles only in a multiselect', () => {
+  const multi = drive(initPicker({ items: THREE, multi: true }), ['space', 'down', 'space'])
+  assert.deepEqual(pickedIndexes(multi), [0, 1])
+
+  const single = drive(initPicker({ items: THREE }), ['space'])
+  assert.deepEqual(pickedIndexes(single), [], 'space is inert in a single select')
+})
+
+test('enter in a single select resolves to the row under the cursor', () => {
+  const s = drive(initPicker({ items: THREE, checked: [true, false, false] }), ['down', 'enter'])
+  assert.equal(s.done, true)
+  assert.deepEqual(pickedIndexes(s), [1], 'the pre-checked row must not leak into a single select')
+})
+
+test('a and n select all and none', () => {
+  const all = drive(initPicker({ items: THREE, multi: true }), [char('a')])
+  assert.deepEqual(pickedIndexes(all), [0, 1, 2])
+  const none = drive(initPicker({ items: THREE, multi: true, checked: [true, true, true] }), [char('n')])
+  assert.deepEqual(pickedIndexes(none), [])
+})
+
+test('cancelling is distinguishable from confirming an empty selection', () => {
+  // switch --none deactivates everything. If escape and "confirm with nothing
+  // ticked" collapsed into the same answer, backing out of the picker would
+  // silently unload every connection in the project.
+  const escaped = drive(initPicker({ items: THREE, multi: true, checked: [true, false, false] }), ['esc'])
+  assert.equal(escaped.cancelled, true)
+  assert.equal(escaped.done, false)
+
+  const emptied = drive(initPicker({ items: THREE, multi: true, checked: [true, false, false] }), [char('n'), 'enter'])
+  assert.equal(emptied.cancelled, false)
+  assert.equal(emptied.done, true)
+  assert.deepEqual(pickedIndexes(emptied), [])
+})
+
+test('ctrl-c and EOF cancel rather than confirming', () => {
+  for (const key of ['ctrl-c', 'eof']) {
+    const s = drive(initPicker({ items: THREE, multi: true, checked: [true, true, true] }), [key])
+    assert.equal(s.cancelled, true, `${key} must cancel`)
+    assert.equal(s.done, false)
+  }
+})
+
+test('a registered hotkey escapes the loop without confirming', () => {
+  const s = drive(initPicker({ items: THREE, hotkeys: ['r'] }), [char('r')])
+  assert.equal(s.action, 'r')
+  assert.equal(s.done, false)
+  assert.equal(s.cancelled, false)
+})
+
+test('an unregistered letter is inert, not a hotkey', () => {
+  const s = drive(initPicker({ items: THREE, hotkeys: [] }), [char('r')])
+  assert.equal(s.action, null)
+  assert.equal(s.cursor, 0)
+})
+
+test('number keys jump, and toggle in a multiselect', () => {
+  const multi = drive(initPicker({ items: THREE, multi: true }), [char('3')])
+  assert.equal(multi.cursor, 2)
+  assert.deepEqual(pickedIndexes(multi), [2])
+
+  const out = drive(initPicker({ items: THREE, multi: true }), [char('9')])
+  assert.equal(out.cursor, 0, 'a number past the end must not move the cursor off the list')
+})
+
+test('applyKey never mutates the state it was given', () => {
+  const before = initPicker({ items: THREE, multi: true })
+  const snapshot = JSON.stringify(before)
+  applyKey(before, { name: 'space' })
+  applyKey(before, { name: 'down' })
+  assert.equal(JSON.stringify(before), snapshot)
+})
+
+test('an empty picker can still be escaped', () => {
+  const s = drive(initPicker({ items: [], multi: true }), ['down', 'space', 'esc'])
+  assert.equal(s.cancelled, true)
+})
+
+test('renderPicker marks the cursor and the checked rows', () => {
+  const state = initPicker({ items: THREE, multi: true, checked: [true, false, false], cursor: 1 })
+  const lines = renderPicker(state, { width: 60 })
+  assert.match(lines[0], /◉ wf-a/)
+  assert.match(lines[1], /^\s+❯ ◯ wf-b/, 'the cursor row carries the marker')
+  assert.ok(lines.some((l) => /space toggle/.test(l)), 'multiselect keys are advertised')
+  assert.ok(lines.every((l) => !/\x1b\[/.test(l)), 'no colour unless asked for')
+})
+
+test('the footer is inside the redrawn block so a live figure can move', () => {
+  const state = initPicker({ items: THREE, multi: true, checked: [true, true, false] })
+  const lines = renderPicker(state, { width: 60, footer: (s) => `${pickedIndexes(s).length} selected` })
+  assert.ok(lines.some((l) => l.includes('2 selected')))
+})
+
+test('renderPicker clips rather than wrapping a narrow terminal', () => {
+  const state = initPicker({ items: [{ label: 'wf-a', hint: 'x'.repeat(200) }] })
+  for (const line of renderPicker(state, { width: 40 })) {
+    assert.ok(line.length <= 40, `line overflowed: ${line.length}`)
+  }
+})
+
+// ---------------------------------------------------------------------------
+// flow decisions
+// ---------------------------------------------------------------------------
+
+const ROW = (over = {}) => ({
+  server: 'wf-a', label: 'A', health: 'connected', sites: ['A'],
+  verifiedAt: '2026-08-14T00:00:00Z', verifyFailed: false, active: true, workspaceIds: [], ...over,
+})
+
+test('verify pre-selects the cheap correct set, not everything', () => {
+  // The whole cost fix: a bare interactive `verify` must not re-buy results it
+  // already has. Fresh rows arrive unticked.
+  const now = Date.parse('2026-08-15T00:00:00Z')
+  const plan = verifyPlan([
+    ROW({ server: 'fresh', verifiedAt: '2026-08-14T00:00:00Z' }),
+    ROW({ server: 'stale', verifiedAt: '2026-06-01T00:00:00Z' }),
+    ROW({ server: 'never', verifiedAt: null, sites: null }),
+    ROW({ server: 'failed', verifiedAt: '2026-08-14T00:00:00Z', verifyFailed: true }),
+  ], { now })
+
+  assert.deepEqual(plan.map((p) => p.preselect), [false, true, true, true])
+  assert.equal(plan[0].stale, false)
+  assert.equal(plan[1].stale, true)
+  assert.equal(plan[2].never, true)
+})
+
+test('an unparseable verifiedAt counts as never checked, not as fresh', () => {
+  // Reading a corrupt timestamp as "recent" would silently skip the check.
+  const plan = verifyPlan([ROW({ verifiedAt: 'not a date' })], { now: Date.now() })
+  assert.equal(plan[0].never, true)
+  assert.equal(plan[0].preselect, true)
+})
+
+test('the staleness window is a week', () => {
+  assert.equal(VERIFY_STALE_MS, 7 * 24 * 60 * 60 * 1000)
+})
+
+test('verifyCost is the figure shown before the money is spent', () => {
+  assert.deepEqual(verifyCost(0), { count: 0, usd: 0, seconds: 0 })
+  assert.deepEqual(verifyCost(3), { count: 3, usd: 0.12, seconds: 27 })
+})
+
+test('switchArgv collapses to --all and --none', () => {
+  const owned = ['wf-a', 'wf-b']
+  assert.deepEqual(switchArgv({ active: [], owned }), ['switch', '--none'])
+  assert.deepEqual(switchArgv({ active: ['wf-a', 'wf-b'], owned }), ['switch', '--all'])
+  assert.deepEqual(switchArgv({ active: ['wf-a'], owned }), ['switch', 'a'])
+  assert.deepEqual(switchArgv({ active: ['wf-a'], owned, write: true }), ['switch', 'a', '--write'])
+})
+
+test('switchArgv strips the configured prefix, not a hardcoded one', () => {
+  assert.deepEqual(switchArgv({ active: ['x-a'], owned: ['x-a', 'x-b'], pfx: 'x-' }), ['switch', 'a'])
+})
+
+test('the dashboard leads with a file conflict, because it undoes the switch', () => {
+  const problems = dashboardProblems({
+    rows: [ROW()],
+    activation: { fileConflict: true, connectorsSuppressed: false },
+  })
+  assert.equal(problems[0].id, 'file-conflict')
+})
+
+test('the built-in claude.ai connector is never reported as a problem', () => {
+  // Choosing `--none` and using Claude Code's own Webflow connector is a
+  // legitimate end state, not a defect. Flagging it warns someone about a
+  // decision they just made, and promoting it to the first menu row as
+  // "Fix this" claims the tool knows better. It is stated neutrally on the
+  // dashboard; the choice belongs at the moment of switching to none.
+  const rows = [ROW({ active: false })]
+  for (const connectorsSuppressed of [true, false]) {
+    const problems = dashboardProblems({ rows, activation: { connectorsSuppressed } })
+    assert.ok(
+      !problems.some((p) => p.id === 'connector-hole'),
+      `connectorsSuppressed=${connectorsSuppressed} must not raise a problem`
+    )
+  }
+})
+
+test('an empty active set does not become a menu row on its own', () => {
+  const rows = [ROW({ active: false })]
+  const problems = dashboardProblems({ rows, activation: { connectorsSuppressed: false } })
+  const items = menuItems({ rows, problems })
+  assert.ok(!items.some((i) => i.id.startsWith('fix-connector')), 'nothing to fix')
+  assert.equal(items[0].id, 'switch', 'the menu opens on the normal first action')
+})
+
+test('never-checked connections are surfaced, and a failed check is not called unchecked', () => {
+  const unchecked = dashboardProblems({ rows: [ROW({ sites: null, verifiedAt: null })], activation: {} })
+  assert.ok(unchecked.some((p) => p.id === 'unverified'))
+
+  const failed = dashboardProblems({ rows: [ROW({ sites: null, verifyFailed: true })], activation: {} })
+  assert.ok(!failed.some((p) => p.id === 'unverified'), 'a failed check is its own state')
+})
+
+test('no connections means no problems to report', () => {
+  assert.deepEqual(dashboardProblems({ rows: [], activation: { fileConflict: true } }), [])
+})
+
+test('the menu is derived from state, and never offers Status', () => {
+  const empty = menuItems({ rows: [], problems: [] })
+  assert.deepEqual(empty.map((i) => i.id), ['connect', 'doctor'])
+
+  const full = menuItems({ rows: [ROW()], problems: [] })
+  assert.deepEqual(full.map((i) => i.id), ['switch', 'connect', 'verify', 'remove', 'doctor'])
+  assert.ok(!full.some((i) => i.id === 'status'), 'the dashboard above the menu is status')
+})
+
+test('the top problem becomes the first menu row', () => {
+  const problems = dashboardProblems({ rows: [ROW()], activation: { fileConflict: true } })
+  const items = menuItems({ rows: [ROW()], problems })
+  assert.equal(items[0].id, 'fix-file-conflict')
+  assert.equal(items[0].label, problems[0].fix)
+})
+
+test('describeVerification does not spend width repeating the age column', () => {
+  assert.equal(describeVerification(ROW({ sites: ['A', 'B'] })), '2 sites — A, B')
+  assert.equal(describeVerification(ROW({ sites: null })), 'never checked')
+  assert.equal(describeVerification(ROW({ sites: null, verifyFailed: true })), 'last check failed')
+})
+
+// ---------------------------------------------------------------------------
+// distribution guards
+// ---------------------------------------------------------------------------
+
+test('bin/wwm imports nothing npm would have to install', () => {
+  // The plugin ships as a bare git clone with no node_modules, and
+  // hooks/hooks.json runs this file on every SessionStart. A dependency here
+  // is an unresolved-module crash before main(), which breaks every plugin
+  // user's sessions — including the never-fatal activate hook. See
+  // internal/INTERACTIVE-UX.md.
+  const source = readFileSync(WWM, 'utf8')
+  const specifiers = [...source.matchAll(/^import\s[^'"]*from\s+['"]([^'"]+)['"]/gm)].map((m) => m[1])
+  assert.ok(specifiers.length > 0, 'expected to find some imports to check')
+  for (const spec of specifiers) {
+    assert.ok(spec.startsWith('node:'), `bin/wwm must only import node: builtins, found "${spec}"`)
+  }
+})
+
+test('bare wwm without a terminal is usage and exit 2, exactly as before', (t) => {
+  // The interactive dashboard must never reach a pipe, the agent's Bash tool,
+  // or CI. Anything automated that runs bare `wwm` has to keep getting the
+  // same bytes and the same exit code.
+  const box = sandbox(t)
+  let status = 0
+  let stdout = ''
+  try {
+    stdout = execFileSync(process.execPath, [WWM], {
+      env: { ...process.env, WWM_CLAUDE_JSON: join(box.base, 'claude.json'), CLAUDE_PLUGIN_DATA: box.data },
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+  } catch (e) {
+    status = e.status
+    stdout = e.stdout
+  }
+  assert.equal(status, 2)
+  assert.match(stdout, /wwm — per-client Webflow MCP connections/)
+  assert.ok(!/↑↓ move/.test(stdout), 'no picker may render without a terminal')
 })

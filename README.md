@@ -57,14 +57,50 @@ The plugin puts `wwm` on `PATH` **inside Claude Code sessions only**. If you wou
 
 ```bash
 npm install -g wicked-webflow-mcp
+```
 
+Run `wwm` with no arguments and you get a dashboard and a menu:
+
+```
+  wwm 0.5.0                                  ~/work/hatchline-site
+
+  ●  wf-hatchline   Hatchline Studio   1 site · Hatchline              2d ago
+  ○  wf-copperfox   Copper & Fox       3 sites · C&F, C&F EU, +1       5d ago
+  ○  wf-northgate   Northgate          never checked
+
+  1 of 3 active here · from .wicked-webflow
+
+  ⚠ Never checked: wf-northgate.
+
+  ❯ Check what it reaches
+    Switch which clients load here
+    Connect a new client
+    Verify what a connection can reach
+    Remove a connection
+    Doctor
+
+  ↑↓ move · enter select · r refresh · esc quit
+```
+
+`●` is active in this project, `○` is authorized but not loaded here. When something needs attention — a `.wicked-webflow` that will undo your last switch, an unverified connection, the connector hole below — the dashboard leads with it and the fix becomes the first row.
+
+Every command still works with arguments, and every interactive action prints the command that would have done it (`→ wwm switch hatchline --write`), so the menu is training wheels rather than a dependency:
+
+```bash
 wwm connect hatchline --label "Hatchline Studio"
 wwm verify hatchline
 wwm status
+wwm switch hatchline --write
 wwm remove hatchline --yes
 ```
 
-Run `wwm connect` with no name and it asks for one, then shows the server name it will create (`acme client` → `wf-acme-client`) before creating it. It only asks when there is a real terminal to ask in — under `--json`, `--quiet`, `--yes`, or with no TTY, a missing name is still a usage error rather than a hang.
+Three of them open a picker when you leave the arguments off:
+
+- **`wwm switch`** — a checkbox list, pre-ticked to what is active now, so confirming without changes is a no-op and it is safe to open just to look. It prints the per-connection tool cost underneath, because that is what you are actually choosing between.
+- **`wwm verify`** — pre-ticked to the connections that are stale or have never been checked, with a running `about $0.08 · about 20s` that moves as you toggle. Anything verified in the last week starts unticked, so the default is the cheap correct one.
+- **`wwm remove`** — shows what each connection currently reaches in the list, offers `switch` first, and asks you to type the name. It destroys the grant, so it is deliberately harder than everything else.
+
+**Interactive only means interactive.** Piped, scripted, `--json`, `--quiet`, `--yes`, or with no TTY, every command behaves exactly as it did before — bare `wwm` prints usage and exits 2, and bare `wwm verify` still means `--all`. Nothing automated can start hanging on a prompt. If your terminal renders the redrawing pickers badly, `WWM_NO_RAW=1` switches them to numbered lists with the same choices.
 
 Zero dependencies; that install puts the one file on your `PATH`. Requires Node **22+**.
 
@@ -91,7 +127,9 @@ Three things to know, all of which are consequences of how Claude Code starts:
 
 **`.wicked-webflow` is what makes it a team thing.** Commit it and a teammate who clones the repo gets the same set from their second session onward, having installed nothing and configured nothing — the plugin's `SessionStart` hook applies it for them. Their *first* session is unfiltered, because the per-project disable list lives in `~/.claude.json` and a clone cannot carry it.
 
-**`--none` is not empty until you close one hole.** With no `wf-*` connection loaded, Claude Code unhides its own `claude.ai Webflow` connector against the same URL — a different grant, scoped by nothing this plugin did. The only thing that suppresses it is `disableClaudeAiConnectors` in the project's `.claude/settings.json`, and that key is all-or-nothing: it disables *every* claude.ai connector in the project, Figma and Linear and Notion included. `wwm switch --none` explains this and asks before writing it, and `wwm status` tells you which state you are in. It is never written silently, and never by the hook.
+**`--none` means no *wwm* connection, not no Webflow.** With no `wf-*` connection loaded, Claude Code's own `claude.ai Webflow` connector can load in that project instead — a separate connection with its own authorization, not one this plugin scoped. That is worth knowing, and it is not a fault: using the built-in connector in a project is a perfectly reasonable thing to want, and `wwm` states the situation rather than warning about it.
+
+If you would rather it did not load there, `wwm switch --none` offers the choice before writing anything. Turning it off means `disableClaudeAiConnectors` in the project's `.claude/settings.json`, which is all-or-nothing — it disables *every* claude.ai connector in that project, Figma and Linear and Notion included. `wwm status` tells you which state you are in. It is never written silently, and never by the hook.
 
 ---
 

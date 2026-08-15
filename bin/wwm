@@ -14,6 +14,7 @@ import { spawnSync } from 'node:child_process'
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { ReadStream } from 'node:tty'
 import { fileURLToPath } from 'node:url'
 
 export const MIN_CLAUDE_VERSION = '2.1.186' // introduced `claude mcp login <name>`
@@ -23,7 +24,7 @@ export const DEFAULT_PREFIX = 'wf-'
 export const PLUGIN_ID = 'wicked-webflow-mcp'
 // npm ships only this file, so the version cannot be read from package.json.
 // Bump in lockstep with package.json, plugin.json, and marketplace.json.
-export const VERSION = '0.4.0'
+export const VERSION = '0.5.0'
 
 export const EXIT = {
   OK: 0,
@@ -424,6 +425,337 @@ export function sameList(a, b) {
   return a.every((v, i) => v === b[i])
 }
 
+/**
+ * Does this `claude` invocation change what `claude mcp list` would say?
+ *
+ * `mcp list` is cached for 60s so the dashboard opens instantly and the menu
+ * loop does not health-check every server on every redraw. That cache has to
+ * be dropped the moment we change the server set, or the screen we redraw
+ * immediately after a `remove` still lists the connection we just destroyed.
+ *
+ * Deciding this from the argv, in one place, rather than remembering to
+ * invalidate at each call site — the bug was a missing invalidation, and more
+ * call sites is more chances to miss it again. login/logout count: they do not
+ * add or remove a name, but they move its health between Connected and Needs
+ * authentication, which is a column on the same screen.
+ */
+export function mutatesServerList(args) {
+  return Array.isArray(args) && args[0] === 'mcp' && ['add', 'remove', 'login', 'logout'].includes(args[1])
+}
+
+// --- interactive kernel (pure half) -----------------------------------------
+//
+// A picker is three pure functions and a read loop. Everything that decides
+// what the screen says lives here so it can be driven from a key script in the
+// tests; only the loop that gets bytes and the writes that paint them are I/O.
+//
+// There is no prompt library because there cannot be one: the plugin ships as
+// a bare git clone with no node_modules, and hooks/hooks.json runs this file on
+// every SessionStart. An unresolved import would crash before main() and break
+// every plugin user's sessions. See internal/INTERACTIVE-UX.md.
+
+/**
+ * Decode one raw-mode read into a key.
+ *
+ * Escape sequences arrive as a single chunk (a Down arrow is one 3-byte read,
+ * not three 1-byte reads), so a lone 0x1b is unambiguously Escape and none of
+ * the usual disambiguation-timer machinery is needed. That only holds if the
+ * caller reads into a buffer big enough to hold a whole sequence.
+ */
+export function decodeKey(bytes) {
+  const b = Array.from(bytes ?? [])
+  if (b.length === 0) return { name: 'none' }
+
+  if (b.length === 1) {
+    switch (b[0]) {
+      case 0x03: return { name: 'ctrl-c' }
+      case 0x04: return { name: 'eof' }
+      case 0x09: return { name: 'tab' }
+      case 0x0a: case 0x0d: return { name: 'enter' }
+      case 0x1b: return { name: 'esc' }
+      case 0x20: return { name: 'space' }
+      case 0x7f: case 0x08: return { name: 'backspace' }
+    }
+  }
+
+  // CSI (ESC [ x) and SS3 (ESC O x) — the second covers terminals in
+  // application-cursor mode, which is not exotic: it is what happens inside
+  // less, tmux copy-mode, and some ssh sessions.
+  if (b[0] === 0x1b && (b[1] === 0x5b || b[1] === 0x4f) && b.length >= 3) {
+    switch (b[2]) {
+      case 0x41: return { name: 'up' }
+      case 0x42: return { name: 'down' }
+      case 0x43: return { name: 'right' }
+      case 0x44: return { name: 'left' }
+      case 0x48: return { name: 'home' }
+      case 0x46: return { name: 'end' }
+    }
+    return { name: 'unknown' }
+  }
+
+  if (b[0] === 0x1b) return { name: 'unknown' }
+  if (b.some((n) => n < 0x20)) return { name: 'unknown' }
+
+  const text = Buffer.from(b).toString('utf8')
+  return { name: 'char', char: text }
+}
+
+/**
+ * Advance a picker's state by one key. Pure: returns a new state, never
+ * mutates, and never does anything but move the cursor and set flags.
+ *
+ * `done` and `cancelled` are the two terminal flags; `action` carries a hotkey
+ * the caller registered (the dashboard's `r` for refresh) back out of the loop.
+ * Cancelling is always distinguishable from confirming an empty selection —
+ * "no connections here" is a real choice and must not be confused with "never
+ * mind".
+ */
+export function applyKey(state, key) {
+  const n = state.items.length
+  const next = { ...state, checked: [...state.checked], action: null }
+  if (n === 0 && key.name !== 'esc' && key.name !== 'ctrl-c') {
+    if (key.name === 'enter') next.done = true
+    return next
+  }
+
+  switch (key.name) {
+    case 'up': next.cursor = (state.cursor - 1 + n) % n; return next
+    case 'down': next.cursor = (state.cursor + 1) % n; return next
+    case 'home': next.cursor = 0; return next
+    case 'end': next.cursor = n - 1; return next
+    case 'esc': case 'ctrl-c': case 'eof': next.cancelled = true; return next
+    case 'enter':
+      // Single-select resolves to the row under the cursor. Doing it here
+      // rather than in the driver means the tests see the same answer the user
+      // would get.
+      if (!state.multi) next.checked = state.items.map((_, i) => i === state.cursor)
+      next.done = true
+      return next
+    case 'space':
+      if (state.multi) next.checked[state.cursor] = !next.checked[state.cursor]
+      return next
+    case 'char': {
+      const c = state.multi ? key.char.toLowerCase() : key.char
+      if (state.multi && c === 'a') { next.checked = state.items.map(() => true); return next }
+      if (state.multi && c === 'n') { next.checked = state.items.map(() => false); return next }
+      if ((state.hotkeys ?? []).includes(key.char.toLowerCase())) {
+        next.action = key.char.toLowerCase()
+        return next
+      }
+      // 1-9 jumps to a row. In a multiselect it toggles too, because someone
+      // typing a number at a checkbox list means "that one".
+      if (/^[1-9]$/.test(key.char)) {
+        const i = Number(key.char) - 1
+        if (i < n) {
+          next.cursor = i
+          if (state.multi) next.checked[i] = !next.checked[i]
+        }
+      }
+      return next
+    }
+    default: return next
+  }
+}
+
+export function initPicker({ items, multi = false, checked = null, cursor = 0, hotkeys = [], quitLabel = 'cancel' }) {
+  return {
+    items,
+    multi,
+    checked: checked ? [...checked] : items.map(() => false),
+    cursor: Math.max(0, Math.min(cursor, Math.max(0, items.length - 1))),
+    hotkeys,
+    quitLabel,
+    done: false,
+    cancelled: false,
+    action: null,
+  }
+}
+
+export function pickedIndexes(state) {
+  return state.checked.map((on, i) => (on ? i : -1)).filter((i) => i >= 0)
+}
+
+const ANSI = {
+  dim: (s) => `\x1b[2m${s}\x1b[22m`,
+  bold: (s) => `\x1b[1m${s}\x1b[22m`,
+  cyan: (s) => `\x1b[36m${s}\x1b[39m`,
+}
+
+function pad(text, width) {
+  return text.length >= width ? text : text + ' '.repeat(width - text.length)
+}
+
+function clip(text, width) {
+  if (width <= 1) return ''
+  return text.length <= width ? text : text.slice(0, width - 1) + '…'
+}
+
+/**
+ * Render the whole interactive region, footer included.
+ *
+ * The footer is inside the redrawn block on purpose: the verify picker's cost
+ * estimate has to move as rows are toggled, and a number that only appears
+ * after you commit is not a number anyone can act on.
+ */
+export function renderPicker(state, { width = 80, footer = null, color = false } = {}) {
+  const c = color ? ANSI : { dim: (s) => s, bold: (s) => s, cyan: (s) => s }
+  const lines = []
+
+  const labelWidth = Math.min(
+    38,
+    state.items.reduce((max, it) => Math.max(max, String(it.label).length), 0)
+  )
+
+  state.items.forEach((item, i) => {
+    const cursor = i === state.cursor
+    const mark = state.multi ? (state.checked[i] ? '◉' : '◯') : ' '
+    const head = `${cursor ? '❯' : ' '} ${mark}${state.multi ? ' ' : ''}`
+    const label = item.hint ? pad(String(item.label), labelWidth) : String(item.label)
+    const hint = item.hint ? `  ${item.hint}` : ''
+    const body = clip(label + hint, Math.max(10, width - head.length - 2)).trimEnd()
+    lines.push(`  ${head}${cursor ? c.bold(body) : body}`)
+  })
+
+  if (state.items.length === 0) lines.push(c.dim('  (nothing to choose from)'))
+
+  const foot = typeof footer === 'function' ? footer(state) : footer
+  if (foot) {
+    lines.push('')
+    for (const l of String(foot).split('\n')) lines.push(`  ${l}`)
+  }
+
+  lines.push('')
+  lines.push(c.dim(`  ${keyHints(state)}`))
+  return lines
+}
+
+export function keyHints(state) {
+  const parts = ['↑↓ move']
+  if (state.multi) parts.push('space toggle', 'a all', 'n none')
+  parts.push('enter select')
+  if ((state.hotkeys ?? []).includes('r')) parts.push('r refresh')
+  parts.push(`esc ${state.quitLabel ?? 'cancel'}`)
+  return parts.join(' · ')
+}
+
+// --- flow decisions (pure half) ---------------------------------------------
+
+/**
+ * The command that reproduces what the picker just did.
+ *
+ * Every interactive action echoes one of these. The interface is meant to be
+ * training wheels, not a dependency — someone who uses `switch` three times
+ * should end up typing it directly.
+ */
+export function switchArgv({ active, owned, write = false, pfx = DEFAULT_PREFIX }) {
+  const argv = ['switch']
+  if (active.length === 0) argv.push('--none')
+  else if (active.length === owned.length) argv.push('--all')
+  else for (const name of active) argv.push(name.startsWith(pfx) ? name.slice(pfx.length) : name)
+  if (write) argv.push('--write')
+  return argv
+}
+
+// Measured on 2.1.223 at haiku: ~$0.04 and 7-11s per verification, billed to
+// the user's own Claude account. Fresh results inside the staleness window are
+// reused rather than re-bought.
+export const VERIFY_STALE_MS = 7 * 86_400_000
+export const VERIFY_COST_USD = 0.04
+export const VERIFY_SECONDS = 9
+
+/**
+ * Which connections a bare interactive `verify` should arrive pre-selected.
+ *
+ * Never-checked, stale, and previously-failed. Anything verified recently
+ * starts unticked, so the default action is the cheap correct one and "check
+ * everything" is a choice someone made rather than a default they inherited.
+ */
+export function verifyPlan(rows, { now = Date.now(), staleMs = VERIFY_STALE_MS } = {}) {
+  return rows.map((r) => {
+    const at = r.verifiedAt ? Date.parse(r.verifiedAt) : NaN
+    const never = !r.verifiedAt || Number.isNaN(at)
+    const stale = !never && now - at > staleMs
+    const failed = Boolean(r.verifyFailed)
+    return { server: r.server, never, stale, failed, preselect: never || stale || failed }
+  })
+}
+
+export function verifyCost(count) {
+  return { count, usd: Number((count * VERIFY_COST_USD).toFixed(2)), seconds: count * VERIFY_SECONDS }
+}
+
+/**
+ * What a dashboard row is worth knowing at a glance.
+ *
+ * No staleness marker here: the dashboard prints the age in its own column, so
+ * "45d ago" already says it, and spending width on saying it twice pushes the
+ * site names — the only thing that catches a grant pointed at the wrong
+ * target — off the end of the line.
+ */
+export function describeVerification(row) {
+  if (row.verifyFailed) return 'last check failed'
+  if (row.sites === null) return 'never checked'
+  return describeSites(row.sites)
+}
+
+/**
+ * What the dashboard should lead with, most actionable first.
+ *
+ * A menu that lists capabilities in a fixed order makes the user do the
+ * diagnosis. These are the three states where wwm already knows something is
+ * wrong, so it says so and puts the fix in the first row.
+ */
+export function dashboardProblems({ rows = [], activation = {} } = {}) {
+  const out = []
+  if (rows.length === 0) return out
+
+  if (activation.fileConflict) {
+    out.push({
+      id: 'file-conflict',
+      text: `${WICKED_FILE} lists a different set, and it wins at session start — the current set will be undone.`,
+      fix: `Fix this — write what's loaded here to ${WICKED_FILE}`,
+    })
+  }
+
+  // The built-in claude.ai Webflow connector being available is NOT listed
+  // here. It is a fact about the project, not a defect: choosing `--none` and
+  // using the built-in connector is a legitimate end state, and plenty of
+  // people want exactly that. Flagging it warns someone about a decision they
+  // already made, and promoting it to the first menu row as "Fix this" says
+  // the tool knows better than they do. It is stated neutrally on the
+  // dashboard instead, and the choice is offered where it belongs — at the
+  // moment of switching to none.
+
+  const unchecked = rows.filter((r) => r.sites === null && !r.verifyFailed)
+  if (unchecked.length) {
+    out.push({
+      id: 'unverified',
+      text: `Never checked: ${unchecked.map((r) => r.server).join(', ')}.`,
+      fix: `Check what ${unchecked.length === 1 ? 'it reaches' : 'they reach'}`,
+    })
+  }
+
+  return out
+}
+
+/**
+ * The dashboard menu. Derived, not fixed: there is no Switch row before there
+ * is anything to switch between, and no Status row ever — the dashboard above
+ * the menu IS status.
+ */
+export function menuItems({ rows = [], problems = [] } = {}) {
+  const items = []
+  if (problems.length) items.push({ id: `fix-${problems[0].id}`, label: problems[0].fix })
+  if (rows.length) items.push({ id: 'switch', label: 'Switch which clients load here' })
+  items.push({ id: 'connect', label: 'Connect a new client' })
+  if (rows.length) {
+    items.push({ id: 'verify', label: 'Verify what a connection can reach' })
+    items.push({ id: 'remove', label: 'Remove a connection' })
+  }
+  items.push({ id: 'doctor', label: 'Doctor' })
+  return items
+}
+
 // ---------------------------------------------------------------------------
 // I/O below this line.
 // ---------------------------------------------------------------------------
@@ -537,6 +869,263 @@ function promptLine(question) {
   return Buffer.from(bytes).toString('utf8').trim()
 }
 
+// --- interactive kernel (I/O half) ------------------------------------------
+//
+// Raw mode on the /dev/tty fd, read synchronously. `main()` stays a
+// straight-line synchronous function; nothing here needs the event loop.
+
+const OUT = (s) => process.stderr.write(s)
+const SHOW_CURSOR = '\x1b[?25h'
+const HIDE_CURSOR = '\x1b[?25l'
+
+/**
+ * The terminal we have put into raw mode, if any.
+ *
+ * Leaving a terminal raw with a hidden cursor is the worst thing this tool
+ * could do to someone — no echo, no cursor, and no obvious way back short of
+ * `reset`. So restoration is idempotent, runs from a `finally`, AND is
+ * registered on process exit, because the paths out of a picker include
+ * exceptions and ^C as well as a normal return.
+ */
+let RAW = null
+
+function restoreTty() {
+  if (!RAW) return
+  const { stream, fd } = RAW
+  RAW = null
+  try { stream.setRawMode(false) } catch { /* already gone */ }
+  try { OUT(SHOW_CURSOR) } catch { /* stderr may be closed */ }
+  try { closeSync(fd) } catch { /* already closed */ }
+}
+
+process.on('exit', restoreTty)
+
+/**
+ * Put /dev/tty in raw mode, or return null if this terminal cannot do it.
+ *
+ * WWM_NO_RAW forces the numbered fallback. It exists for the tests, and for
+ * anyone whose terminal renders the redrawing picker badly — a screen reader,
+ * a serial console, an editor's embedded shell.
+ */
+function openRawTty() {
+  if (process.env.WWM_NO_RAW) return null
+  let fd
+  try { fd = openSync('/dev/tty', 'rs') } catch { return null }
+  try {
+    const stream = new ReadStream(fd)
+    stream.setRawMode(true)
+    RAW = { stream, fd }
+    return RAW
+  } catch {
+    try { closeSync(fd) } catch { /* nothing to clean up */ }
+    return null
+  }
+}
+
+/** Colour only when a real terminal is on the other end and nobody said no. */
+function useColor() {
+  if (process.env.NO_COLOR) return false
+  if (process.env.TERM === 'dumb') return false
+  return Boolean(process.stderr.isTTY)
+}
+
+function ttyWidth() {
+  const w = process.stderr.columns
+  return Number.isInteger(w) && w > 20 ? w : 80
+}
+
+/** Read one keypress. The buffer is big enough to hold a whole escape sequence. */
+function readKey(fd) {
+  const buf = Buffer.alloc(16)
+  for (;;) {
+    let n
+    try {
+      n = readSync(fd, buf, 0, buf.length, null)
+    } catch (e) {
+      if (e.code === 'EAGAIN') continue // nothing typed yet
+      if (e.code === 'EOF') return { name: 'eof' }
+      throw e
+    }
+    if (n === 0) return { name: 'eof' }
+    return decodeKey(buf.subarray(0, n))
+  }
+}
+
+/**
+ * Run a picker to completion.
+ *
+ * Returns { indexes, cancelled, action }. Callers must branch on `cancelled`
+ * before reading `indexes` — an empty selection that was confirmed and a picker
+ * that was escaped mean opposite things, and `switch --none` is exactly the
+ * case where treating them the same would deactivate everything by accident.
+ */
+function pick({ title = null, items, multi = false, checked = null, cursor = 0, hotkeys = [], footer = null, quitLabel = 'cancel' }) {
+  if (title) { OUT('\n'); OUT(`  ${useColor() ? ANSI.bold(title) : title}\n`); OUT('\n') }
+
+  const raw = openRawTty()
+  if (!raw) return pickNumbered({ items, multi, checked, footer })
+
+  let state = initPicker({ items, multi, checked, cursor, hotkeys, quitLabel })
+  const opts = () => ({ width: ttyWidth(), footer, color: useColor() })
+  let painted = 0
+
+  const paint = () => {
+    if (painted) OUT(`\x1b[${painted}A`)
+    OUT('\x1b[0J')
+    const lines = renderPicker(state, opts())
+    OUT(lines.join('\n') + '\n')
+    painted = lines.length
+  }
+
+  try {
+    OUT(HIDE_CURSOR)
+    paint()
+    for (;;) {
+      state = applyKey(state, readKey(raw.fd))
+      if (state.done || state.cancelled || state.action) break
+      paint()
+    }
+    // Erase the picker. What was chosen gets reported by the caller in one
+    // line; leaving a stale checkbox list above it just makes the scrollback
+    // harder to read.
+    if (painted) { OUT(`\x1b[${painted}A`); OUT('\x1b[0J') }
+  } finally {
+    restoreTty()
+  }
+
+  return { indexes: pickedIndexes(state), cancelled: state.cancelled, action: state.action }
+}
+
+/**
+ * The degraded path: numbered lists over plain line reads.
+ *
+ * Reached when there is no controlling terminal or raw mode is refused — a
+ * dumb terminal, some CI shells, Windows (where /dev/tty does not exist and
+ * `promptLine` already returns null). Not dead code, and not a lesser feature
+ * set: everything the arrow-key picker can express is expressible here.
+ */
+function pickNumbered({ items, multi, checked, footer }) {
+  const state = initPicker({ items, multi, checked })
+  if (items.length === 0) return { indexes: [], cancelled: false, action: null }
+
+  for (let attempt = 0; attempt < 10; attempt++) {
+    for (const [i, item] of items.entries()) {
+      const mark = multi ? (state.checked[i] ? '[x] ' : '[ ] ') : ''
+      OUT(`  ${String(i + 1).padStart(2)}) ${mark}${item.label}${item.hint ? `  ${item.hint}` : ''}\n`)
+    }
+    const foot = typeof footer === 'function' ? footer(state) : footer
+    if (foot) { OUT('\n'); for (const l of String(foot).split('\n')) OUT(`  ${l}\n`) }
+    OUT('\n')
+
+    const answer = promptLine(multi
+      ? '  Toggle numbers (space separated) · a=all · n=none · enter=done · q=cancel: '
+      : '  Choose a number (q to cancel): ')
+    if (answer === null) return { indexes: [], cancelled: true, action: null }
+
+    const words = answer.trim().toLowerCase().split(/\s+/).filter(Boolean)
+    if (words.includes('q')) return { indexes: [], cancelled: true, action: null }
+
+    if (!multi) {
+      const n = Number(words[0])
+      if (Number.isInteger(n) && n >= 1 && n <= items.length) {
+        return { indexes: [n - 1], cancelled: false, action: null }
+      }
+      OUT(`  ${sym.bad} Enter a number between 1 and ${items.length}.\n\n`)
+      continue
+    }
+
+    if (words.length === 0) return { indexes: pickedIndexes(state), cancelled: false, action: null }
+    if (words.includes('a')) { state.checked = items.map(() => true); OUT('\n'); continue }
+    if (words.includes('n')) { state.checked = items.map(() => false); OUT('\n'); continue }
+
+    let bad = null
+    for (const w of words) {
+      const n = Number(w)
+      if (!Number.isInteger(n) || n < 1 || n > items.length) { bad = w; break }
+      state.checked[n - 1] = !state.checked[n - 1]
+    }
+    if (bad) OUT(`  ${sym.bad} "${bad}" is not one of the numbers above.\n`)
+    OUT('\n')
+  }
+
+  return { indexes: pickedIndexes(state), cancelled: false, action: null }
+}
+
+/**
+ * A free-text answer with a live preview line under it.
+ *
+ * The preview is the reason this is raw-mode rather than a `promptLine` call:
+ * `acme client` becomes `wf-acme-client`, and watching that happen as you type
+ * is the difference between a name you chose and a name you discovered
+ * afterwards.
+ */
+function askText(label, { initial = '', preview = null, validate = null } = {}) {
+  const raw = openRawTty()
+  if (!raw) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const answer = promptLine(`  ${label}: `)
+      if (answer === null) return null
+      const error = validate ? validate(answer) : null
+      if (!error) return answer
+      OUT(`  ${sym.bad} ${error}\n`)
+    }
+    return null
+  }
+
+  let value = initial
+  let painted = 0
+  const color = useColor()
+
+  const paint = () => {
+    if (painted) OUT(`\x1b[${painted}A`)
+    OUT('\x1b[0J')
+    const lines = [`  ${label}  ${value}${color ? ANSI.dim('▏') : '▏'}`]
+    const hint = preview ? preview(value) : null
+    if (hint) lines.push(`  ${' '.repeat(label.length)}  ${color ? ANSI.dim(hint) : hint}`)
+    const error = value && validate ? validate(value) : null
+    if (error) lines.push(`  ${sym.bad} ${error}`)
+    OUT(lines.join('\n') + '\n')
+    painted = lines.length
+  }
+
+  try {
+    OUT(HIDE_CURSOR)
+    paint()
+    for (;;) {
+      const key = readKey(raw.fd)
+      if (key.name === 'esc' || key.name === 'ctrl-c' || key.name === 'eof') { value = null; break }
+      if (key.name === 'enter') {
+        if (value && !(validate && validate(value))) break
+        continue // an invalid answer is already explained on screen
+      }
+      if (key.name === 'backspace') value = value.slice(0, -1)
+      else if (key.name === 'space') value += ' '
+      else if (key.name === 'char') value += key.char
+      paint()
+    }
+    if (painted) { OUT(`\x1b[${painted}A`); OUT('\x1b[0J') }
+  } finally {
+    restoreTty()
+  }
+
+  return value
+}
+
+/** y/N over a plain line read — no raw mode needed for one character. */
+function askConfirm(question, { defaultYes = false } = {}) {
+  const answer = promptLine(`  ${question} ${defaultYes ? '[Y/n]' : '[y/N]'} `)
+  if (answer === null) return false
+  const text = String(answer).trim()
+  if (!text) return defaultYes
+  return /^y(es)?$/i.test(text)
+}
+
+/** Echo the command that would have done this, so the interface teaches itself. */
+function echoCommand(argv) {
+  const quoted = argv.map((a) => (/\s/.test(a) ? JSON.stringify(a) : a)).join(' ')
+  OUT(`\n  ${useColor() ? ANSI.dim(`→ wwm ${quoted}`) : `→ wwm ${quoted}`}\n`)
+}
+
 // --- subprocess -------------------------------------------------------------
 
 function claudeBin() {
@@ -572,6 +1161,11 @@ function runClaude(args, { cwd = undefined, timeout = 180_000, input = undefined
   // "stdin isn't a terminal" even when wwm itself is running in Terminal.app.
   // Inheriting hands over our TTY; the cost is that the child's output goes
   // straight to the terminal and we get status only.
+  // Drop the list cache whatever the exit status: a `mcp remove` that reports
+  // a failure may still have removed the server, and a stale "it's still
+  // there" is the more misleading of the two answers.
+  if (mutatesServerList(args)) invalidateListCache()
+
   if (interactive) {
     const res = spawnSync(bin, args, { cwd, timeout, stdio: 'inherit' })
     if (res.error) throw new Fail(EXIT.GENERIC, `Failed to run \`claude ${args[0] ?? ''}\`: ${res.error.message}`)
@@ -800,6 +1394,11 @@ function requirePreflight() {
 
 function cachePath() { return join(stateDir(), 'mcp-list-cache.json') }
 
+/** Called from runClaude for anything that changes the server set. */
+function invalidateListCache() {
+  try { unlinkSync(cachePath()) } catch { /* nothing cached, or already gone */ }
+}
+
 function listServers({ refresh = false, staleSeconds = 60 } = {}) {
   if (!refresh) {
     try {
@@ -918,23 +1517,35 @@ function cmdVerify(args) {
   requirePreflight()
   const state = loadState()
 
-  const all = args.flags.all || args.positional.length === 0
   const model = args.flags.model ?? 'haiku'
   const maxAge = parseDuration(args.flags['max-age'])
+  const bare = args.positional.length === 0 && !args.flags.all
 
   let names
-  if (all) {
+  let interactive = false
+  if (args.positional.length > 0) {
+    names = args.positional.map((s) => (s.startsWith(prefix()) ? s : serverName(slugify(s))))
+  } else if (bare && canPrompt()) {
+    // A terminal gets the picker, which arrives pre-selected to the cheap
+    // correct answer. Scripts, CI and the agent keep meaning --all, so nothing
+    // automated changes behaviour under them.
+    const chosen = pickConnectionsToVerify(state)
+    if (chosen === null) return EXIT.OK
+    if (chosen.length === 0) { human('Nothing selected — nothing checked.'); return EXIT.OK }
+    names = chosen
+    interactive = true
+  } else {
     names = Object.keys(state.connections)
     if (names.length === 0) throw new Fail(EXIT.USAGE, 'No connections recorded yet.', 'Run `wwm connect <slug>` first.')
     if (ctx.quiet && !args.flags.all) throw new Fail(EXIT.USAGE, '--quiet with no slug requires an explicit --all.', 'Nothing expensive should happen silently.')
-  } else {
-    names = args.positional.map((s) => (s.startsWith(prefix()) ? s : serverName(slugify(s))))
   }
 
   // ~$0.04 and 7-11s each, measured on 2.1.223 at haiku, charged to the
-  // user's own Claude account. Say so before spending it.
-  if (all && names.length > 1 && !ctx.quiet) {
-    human(`Verifying ${names.length} connections. Each spins a headless Claude session — roughly $${(names.length * 0.04).toFixed(2)} and ${Math.ceil((names.length * 9) / 60)} min total, billed to your Claude account.`)
+  // user's own Claude account. Say so before spending it. The picker has
+  // already shown a live figure, so this is only for the non-interactive path.
+  if (!interactive && names.length > 1 && !ctx.quiet) {
+    const { usd, seconds } = verifyCost(names.length)
+    human(`Verifying ${names.length} connections. Each spins a headless Claude session — roughly $${usd.toFixed(2)} and ${Math.ceil(seconds / 60)} min total, billed to your Claude account.`)
     human('')
   }
 
@@ -974,7 +1585,57 @@ function cmdVerify(args) {
     human(`${sym.bad} At least one connection could not be checked. That is "we don't know", not "it's fine".`)
   }
 
+  if (interactive) echoCommand(['verify', ...names.map((n) => (n.startsWith(prefix()) ? n.slice(prefix().length) : n))])
+
   return anyFailed ? EXIT.VERIFY_FAILED : EXIT.OK
+}
+
+/**
+ * The verify picker — the one screen in this tool that spends money, so the
+ * bill is on screen and moves as the selection changes.
+ *
+ * Returns null when cancelled; an empty array is a real answer ("check
+ * nothing") and the caller reports it rather than falling back to everything.
+ */
+function pickConnectionsToVerify(state) {
+  const owned = ownedNames(state)
+  if (owned.length === 0) throw new Fail(EXIT.USAGE, 'No connections recorded yet.', 'Run `wwm connect <slug>` first.')
+
+  const rows = owned.map((name) => {
+    const v = state.connections[name]?.lastVerified
+    return {
+      server: name,
+      verifiedAt: v?.at ?? null,
+      sites: v?.ok ? v.sites : null,
+      verifyFailed: Boolean(v && !v.ok),
+    }
+  })
+
+  const plan = verifyPlan(rows)
+  const items = rows.map((r, i) => {
+    if (plan[i].never) return { label: r.server, hint: 'never checked' }
+    if (plan[i].failed) return { label: r.server, hint: 'last check failed' }
+    // "stale" goes before the site list, not after: it is the reason the row
+    // arrives ticked, and a long site list would otherwise truncate it away.
+    return {
+      label: r.server,
+      hint: `checked ${relativeTime(r.verifiedAt)}${plan[i].stale ? ' · stale' : ''} · ${describeSites(r.sites)}`,
+    }
+  })
+
+  const chosen = pick({
+    title: 'Verify what a connection can reach',
+    items,
+    multi: true,
+    checked: plan.map((p) => p.preselect),
+    footer: (s) => {
+      const { count, usd, seconds } = verifyCost(pickedIndexes(s).length)
+      if (count === 0) return 'nothing selected'
+      return `${count} selected · about $${usd.toFixed(2)} · about ${seconds}s · billed to your Claude account`
+    },
+  })
+
+  return chosen.cancelled ? null : chosen.indexes.map((i) => owned[i])
 }
 
 /** "1 site — Hatchline" / "3 sites — Hatchline, Hatchline EU, Staging" */
@@ -1002,40 +1663,40 @@ function askForSlug() {
     )
   }
 
-  human('Which client is this connection for?')
-  human('A short name becomes the server name and the tool prefix, e.g. "hatchline" -> wf-hatchline.')
-  human('')
+  OUT('\n')
+  OUT(`  ${useColor() ? ANSI.bold('Connect a new client') : 'Connect a new client'}\n`)
+  OUT('\n')
 
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const answer = promptLine('Client name: ')
-    if (answer === null) break
-    if (!answer) { human('  (nothing entered)'); continue }
+  // The preview is the whole reason this is a live-redrawing field rather than
+  // a readline call: slugification is otherwise silent, and the name someone
+  // types is not always the name they get.
+  const answer = askText('Client name', {
+    preview: (v) => {
+      const slug = slugify(v)
+      return slug ? `→ creates ${serverName(slug)}` : null
+    },
+    validate: (v) => validateSlug(slugify(v)),
+  })
 
-    const slug = slugify(answer)
-    const error = validateSlug(slug)
-    if (error) { human(`  ${sym.bad} "${answer}" won't work: ${error}`); continue }
-
-    // Slugification is silent otherwise, and the name they typed is not always
-    // the name they get — show the server name before it is created.
-    if (slug !== answer) human(`  -> ${serverName(slug)}`)
-    human('')
-    return slug
-  }
-
-  throw new Fail(EXIT.USAGE, 'No usable client name given.', CONNECT_USAGE)
+  if (answer === null) return null
+  return slugify(answer)
 }
 
 function cmdConnect(args) {
   requirePreflight()
 
+  const interactive = args.positional.length === 0 && canPrompt()
   const input = args.positional[0] ?? askForSlug()
+  if (input === null) return EXIT.OK // backed out of the name prompt
 
   const slug = slugify(input)
   const slugError = validateSlug(slug)
   if (slugError) throw new Fail(EXIT.USAGE, `Invalid name "${input}": ${slugError}`)
 
   const name = serverName(slug)
-  const label = args.flags.label ?? slug.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
+  const defaultLabel = slug.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
+  const label = args.flags.label ??
+    (interactive ? (askText('Label       ', { initial: defaultLabel }) ?? defaultLabel) : defaultLabel)
   const url = args.flags.url ?? mcpUrl()
 
   // Collision check first — never let `already exists in local config` reach
@@ -1093,12 +1754,38 @@ function cmdConnect(args) {
     return EXIT.OK
   }
 
-  human('')
-  human(`Opening Webflow's consent screen in your browser.`)
-  human(`It lists EVERY site in EVERY workspace you can reach, and it is multi-select.`)
-  human(`Tick ${label}'s site or sites; do not tick the workspace row above them.`)
-  human('')
+  // The briefing gets its own screen because this is the moment that decides
+  // what the grant covers, and it is the only moment at which saying it is
+  // cheap. Afterwards a mis-tick looks identical to a correct one.
+  if (interactive) {
+    OUT('\n')
+    OUT(`  Webflow's consent screen is about to open.\n`)
+    OUT('\n')
+    OUT(`  It lists EVERY site in EVERY workspace you can reach, and it is multi-select.\n`)
+    OUT('\n')
+    OUT(`  ▸ Tick ${label}'s site, or sites — a client with three sites is normal.\n`)
+    OUT(`  ▸ Do NOT tick the workspace row above them. One click there grants every\n`)
+    OUT(`    site in that workspace, including other clients', with no confirmation,\n`)
+    OUT(`    and it looks identical afterwards.\n`)
 
+    const go = pick({ items: [{ label: 'Open the browser' }, { label: 'Cancel' }] })
+    if (go.cancelled || go.indexes[0] !== 0) {
+      // The server exists at this point but has no grant. Leaving it behind
+      // would collide with the next attempt at the same name.
+      human('')
+      human(`Cancelled. Rolled back: ${rollbackConnect(name)}`)
+      return EXIT.OK
+    }
+  } else {
+    human('')
+    human(`Opening Webflow's consent screen in your browser.`)
+    human(`It lists EVERY site in EVERY workspace you can reach, and it is multi-select.`)
+    human(`Tick ${label}'s site or sites; do not tick the workspace row above them.`)
+    human('')
+  }
+
+  // Raw mode is off by here — `pick` restores in a finally — which matters
+  // because the login child takes the terminal with stdio: 'inherit'.
   const loginArgs = ['mcp', 'login', name]
   if (args.flags['no-browser']) loginArgs.push('--no-browser')
   const login = runClaude(loginArgs, { timeout: 300_000, interactive: true })
@@ -1168,6 +1855,21 @@ function cmdConnect(args) {
     human('Its tools are available now — no restart needed.')
   }
 
+  // Connecting and switching are nearly always the same intent, so ask here
+  // rather than making someone walk back through the menu for it.
+  if (interactive) {
+    human('')
+    if (askConfirm('Load it in this project too?', { defaultYes: true })) {
+      const after = loadState()
+      const owned = ownedNames(after)
+      const disabled = new Set(disabledServersFor(resolvedCwd()))
+      const active = owned.filter((n) => !disabled.has(n))
+      if (!active.includes(name)) active.push(name)
+      cmdSwitch({ flags: {}, positional: active })
+    }
+    echoCommand(['connect', slug, '--label', label])
+  }
+
   return EXIT.OK
 }
 
@@ -1187,15 +1889,19 @@ function rollbackConnect(name) {
   return out.join(', ')
 }
 
-function cmdStatus(args) {
-  requirePreflight()
+/**
+ * One read of everything the interface needs: health from `mcp list`, scope
+ * from state.json, activation from ~/.claude.json and `.wicked-webflow`.
+ *
+ * Both `status` and the dashboard go through this, so the table and the menu
+ * can never disagree, and the agent gets the same picture in one call rather
+ * than three.
+ */
+function gatherStatus({ refresh = false, staleSeconds = 60, dir = resolvedCwd() } = {}) {
   const state = loadState()
-  const listed = listServers({
-    refresh: Boolean(args.flags.refresh),
-    staleSeconds: parseDuration(args.flags.stale) ? parseDuration(args.flags.stale) / 1000 : 60,
-  })
+  const listed = listServers({ refresh, staleSeconds })
 
-  const disabled = new Set(disabledServersFor(process.cwd()))
+  const disabled = new Set(disabledServersFor(dir))
   const owned = listed.servers.filter((s) => s.name.startsWith(prefix()))
 
   const rows = owned.map((s) => {
@@ -1211,18 +1917,37 @@ function cmdStatus(args) {
       // Records written before 0.4.0 spelled this `isolated`.
       singleSite: v?.ok ? (v.singleSite ?? v.isolated ?? null) : null,
       verifiedAt: v?.at ?? null,
+      verifyFailed: Boolean(v && !v.ok),
       // ACTIVE is not an `mcp list` field: a disabled server still prints
       // "✔ Connected". It must be read from disabledMcpServers.
       active: !disabled.has(s.name),
     }
   })
 
-  const dir = resolvedCwd()
   const file = readWickedFile(dir)
+  const known = new Set(rows.map((r) => r.server))
+  const fileWanted = file
+    ? [...new Set(file.entries.map((e) => toServerName(e, prefix())))].filter((n) => known.has(n))
+    : null
+  const activeNames = rows.filter((r) => r.active).map((r) => r.server)
+
   const activation = {
     source: file ? WICKED_FILE : state.projects?.[dir]?.active ? 'plugin state' : 'default (all)',
     connectorsSuppressed: readSettings(dir)?.[CONNECTOR_KEY] === true,
+    // The file wins at session start, so a mismatch means the switch that is
+    // showing as applied right now will be undone next session.
+    fileConflict: Boolean(fileWanted && !sameList([...fileWanted].sort(), [...activeNames].sort())),
   }
+
+  return { state, listed, rows, activation, dir }
+}
+
+function cmdStatus(args) {
+  requirePreflight()
+  const { listed, rows, activation, dir } = gatherStatus({
+    refresh: Boolean(args.flags.refresh),
+    staleSeconds: parseDuration(args.flags.stale) ? parseDuration(args.flags.stale) / 1000 : 60,
+  })
 
   if (ctx.json) {
     emitJson({ ok: true, cwd: dir, servers: rows, activation, cached: listed.cached })
@@ -1246,14 +1971,14 @@ function cmdStatus(args) {
   human('')
   human(`${rows.length} connection${rows.length === 1 ? '' : 's'} · ${activeCount} active in ${dir} (from ${activation.source})`)
 
-  // With nothing of ours loaded, Claude Code unhides its own Webflow
-  // connector against the same URL. That grant is not scoped by anything we
-  // did, so an empty active set is only actually empty if the key is set.
+  // With nothing of ours loaded, Claude Code unhides its own Webflow connector
+  // against the same URL. Worth stating, because "no wf- connection here" does
+  // not mean "no Webflow here" — but it is a fact about the project, not a
+  // fault. `wwm switch --none` offers the choice; status just reports it.
   if (activeCount === 0 && !activation.connectorsSuppressed) {
-    human(`${sym.warn} No wwm connection is active, so "claude.ai Webflow" can load here instead — an unscoped grant.`)
-    human(`   \`wwm switch --none\` offers to close that; it disables every claude.ai connector in this project.`)
+    human(`Claude Code's own Webflow connector can load here.`)
   }
-  if (activation.connectorsSuppressed) human(`${CONNECTOR_KEY} is on here — no claude.ai cloud connectors load in this project.`)
+  if (activation.connectorsSuppressed) human('No claude.ai connectors load in this project.')
 
   // Two connections in one workspace is often intentional — an agency's own
   // workspace holding several clients' sites. State the fact without a verdict
@@ -1270,9 +1995,117 @@ function cmdStatus(args) {
   return EXIT.OK
 }
 
+// --- the dashboard ----------------------------------------------------------
+
+/**
+ * The header above the menu. This is `status`, rendered for a human who is
+ * about to do something — hence no column headings, and the active/inactive
+ * distinction carried by a symbol rather than a word.
+ */
+function renderDashboard({ rows, activation, dir }) {
+  const c = useColor() ? ANSI : { dim: (s) => s, bold: (s) => s, cyan: (s) => s }
+  const width = ttyWidth()
+
+  OUT('\n')
+  OUT(`  ${c.bold(`wwm ${VERSION}`)}  ${c.dim(clip(dir, Math.max(20, width - 20)))}\n`)
+  OUT('\n')
+
+  if (rows.length === 0) {
+    OUT(`  ${c.dim('No connections yet.')}\n\n`)
+    return
+  }
+
+  const nameW = rows.reduce((m, r) => Math.max(m, r.server.length), 0)
+  const labelW = Math.min(20, rows.reduce((m, r) => Math.max(m, String(r.label).length), 0))
+
+  for (const r of rows) {
+    const dot = r.active ? c.cyan(sym.dot) : c.dim(sym.ring)
+    const reach = describeVerification(r)
+    const age = r.sites === null ? '' : relativeTime(r.verifiedAt)
+    const health = r.health === 'connected' ? '' : ` ${sym.warn} ${r.health.replace(/_/g, ' ')}`
+    const body = `${pad(r.server, nameW)}  ${pad(clip(String(r.label), labelW), labelW)}  ${reach}${health}`
+    OUT(`  ${dot}  ${clip(body, Math.max(20, width - 8 - age.length))}${age ? `  ${c.dim(age)}` : ''}\n`)
+  }
+
+  const activeCount = rows.filter((r) => r.active).length
+  OUT('\n')
+  OUT(`  ${c.dim(`${activeCount} of ${rows.length} active here · from ${activation.source}`)}\n`)
+
+  // Stated, not warned about. "No wf- connection here" does not mean "no
+  // Webflow here", and that is worth knowing — but it is not a problem, and
+  // it gets no glyph and no menu row.
+  if (activeCount === 0 && !activation.connectorsSuppressed) {
+    OUT(`  ${c.dim(`Claude Code's own Webflow connector can load here.`)}\n`)
+  }
+
+  for (const p of dashboardProblems({ rows, activation })) {
+    OUT(`\n  ${sym.warn} ${p.text}\n`)
+  }
+  OUT('\n')
+}
+
+/**
+ * Bare `wwm` with a terminal: dashboard, menu, repeat.
+ *
+ * Every branch dispatches into the same command functions the flags reach, so
+ * there is no second implementation of anything and no behaviour that exists
+ * only in here. A `Fail` from a flow is rendered and swallowed — one bad answer
+ * should cost you a menu, not the session.
+ */
+function cmdMenu() {
+  requirePreflight()
+  let refresh = false
+
+  for (;;) {
+    const snap = gatherStatus({ refresh })
+    refresh = false
+    renderDashboard(snap)
+
+    const problems = dashboardProblems(snap)
+    const items = menuItems({ rows: snap.rows, problems })
+    const chosen = pick({ items, hotkeys: ['r'], quitLabel: 'quit' })
+
+    if (chosen.action === 'r') { refresh = true; continue }
+    if (chosen.cancelled || chosen.indexes.length === 0) return EXIT.OK
+
+    try {
+      runMenuChoice(items[chosen.indexes[0]].id, snap)
+    } catch (e) {
+      if (!(e instanceof Fail)) throw e
+      OUT(`\n  ${sym.bad} ${e.message}\n`)
+      if (e.detail) OUT(`${e.detail}\n`)
+    }
+
+    OUT(`\n  ${useColor() ? ANSI.dim('─'.repeat(Math.min(60, ttyWidth() - 4))) : '─'.repeat(40)}\n`)
+  }
+}
+
+function runMenuChoice(id, snap) {
+  const bare = { flags: {}, positional: [] }
+
+  switch (id) {
+    case 'fix-file-conflict': {
+      // Make the committed file agree with what is loaded, rather than the
+      // other way round — the user just looked at this set and kept it.
+      const active = snap.rows.filter((r) => r.active).map((r) => r.server)
+      return active.length === 0
+        ? cmdSwitch({ flags: { none: true, write: true }, positional: [] })
+        : cmdSwitch({ flags: { write: true }, positional: active })
+    }
+    case 'fix-unverified': return cmdVerify(bare)
+    case 'switch': return cmdSwitch(bare)
+    case 'connect': return cmdConnect(bare)
+    case 'verify': return cmdVerify(bare)
+    case 'remove': return cmdRemove(bare)
+    case 'doctor': return cmdDoctor(bare)
+    default: return EXIT.OK
+  }
+}
+
 function cmdRemove(args) {
   requirePreflight()
-  const input = args.positional[0]
+  const input = args.positional[0] ?? (canPrompt() ? pickConnectionToRemove() : null)
+  if (input === CANCELLED) return EXIT.OK
   if (!input) throw new Fail(EXIT.USAGE, 'Usage: wwm remove <slug> [--revoke] [--purge]')
 
   const slug = slugify(input)
@@ -1282,13 +2115,16 @@ function cmdRemove(args) {
   // Empirically (2.1.223) remove ALSO invalidates the named grant everywhere,
   // so there is no "remove but keep the token" option to offer.
   if (!ctx.yes && !args.flags.yes) {
-    throw new Fail(
-      EXIT.USAGE,
-      `This will remove ${name} and destroy its Webflow authorization.`,
-      'Removing a server invalidates its stored grant everywhere — there is no way to remove it and keep the token.\n' +
-        'To deactivate a connection for one project without losing the grant, use `wwm switch` instead.\n' +
-        `Re-run with --yes to proceed.`
-    )
+    if (!canPrompt()) {
+      throw new Fail(
+        EXIT.USAGE,
+        `This will remove ${name} and destroy its Webflow authorization.`,
+        'Removing a server invalidates its stored grant everywhere — there is no way to remove it and keep the token.\n' +
+          'To deactivate a connection for one project without losing the grant, use `wwm switch` instead.\n' +
+          `Re-run with --yes to proceed.`
+      )
+    }
+    if (!confirmRemoval(name)) return EXIT.OK
   }
 
   const steps = []
@@ -1312,7 +2148,63 @@ function cmdRemove(args) {
     human("authorization, also remove it in Webflow's app settings.")
   }
 
+  if (!ctx.json && !args.positional[0]) echoCommand(['remove', slug, '--yes'])
+
   return steps.every((s) => s.ok) ? EXIT.OK : EXIT.GENERIC
+}
+
+/**
+ * A sentinel for "the user backed out", distinct from "no answer". Returning
+ * null here would fall through to the usage error and print a scary-looking
+ * failure at someone who correctly decided not to delete anything.
+ */
+const CANCELLED = Symbol('cancelled')
+
+/** Pick what to remove — with what it currently reaches shown in the list. */
+function pickConnectionToRemove() {
+  const state = loadState()
+  const owned = ownedNames(state)
+  if (owned.length === 0) throw new Fail(EXIT.USAGE, 'No wwm-managed connections to remove.')
+
+  const items = owned.map((name) => {
+    const conn = state.connections[name]
+    const v = conn?.lastVerified
+    // The site list belongs in the picker, not after it. Reading the names is
+    // the only thing that catches "I selected the wrong client".
+    const reach = !v ? 'never checked' : v.ok ? describeSites(v.sites) : 'last check failed'
+    return { label: name, hint: `${conn?.label ?? '—'} · ${reach}` }
+  })
+
+  const chosen = pick({ title: 'Remove a connection', items })
+  if (chosen.cancelled || chosen.indexes.length === 0) return CANCELLED
+  return owned[chosen.indexes[0]]
+}
+
+/**
+ * The only irreversible action in the tool, so it is deliberately harder than
+ * the rest of the interface: the escape hatch is offered first, and confirming
+ * is a typed name rather than a keypress.
+ */
+function confirmRemoval(name) {
+  OUT('\n')
+  OUT(`  ${sym.warn} This destroys the Webflow authorization for ${name}.\n`)
+  OUT(`     Getting it back means another browser round-trip.\n`)
+  OUT('\n')
+  OUT(`     If you only want it out of this project, switch does that and\n`)
+  OUT(`     keeps the authorization.\n`)
+
+  const choice = pick({
+    items: [
+      { label: 'Go back and use switch instead' },
+      { label: `Remove ${name} permanently` },
+    ],
+  })
+  if (choice.cancelled || choice.indexes[0] !== 1) return false
+
+  const typed = askText(`Type ${name} to confirm`, {
+    validate: (v) => (v.trim() === name ? null : `does not match ${name}`),
+  })
+  return typed !== null && typed.trim() === name
 }
 
 // --- activation --------------------------------------------------------------
@@ -1388,6 +2280,7 @@ function cmdSwitch(args) {
   if (owned.length === 0) throw new Fail(EXIT.USAGE, 'No wwm-managed connections yet.', 'Run `wwm connect <client>` first.')
 
   let active
+  let interactive = false
   if (args.flags.none) active = []
   else if (args.flags.all) active = [...owned]
   else if (args.positional.length > 0) {
@@ -1401,16 +2294,24 @@ function cmdSwitch(args) {
       )
     }
     active = wanted
+  } else if (canPrompt()) {
+    const chosen = pickActiveSet(dir, state, owned)
+    // Cancelling is not the same as choosing nothing. `--none` deactivates
+    // everything; escape must leave the project exactly as it was.
+    if (chosen === null) return EXIT.OK
+    active = chosen
+    interactive = true
   } else {
     throw new Fail(EXIT.USAGE, 'Nothing to switch to.', SWITCH_USAGE)
   }
 
   // The connector question, asked before anything is written.
   let suppress = 'skip'
+  let asked = false
   if (active.length === 0) {
     if (args.flags['suppress-connectors'] === false) suppress = 'skip'
     else if (args.flags['suppress-connectors'] === true || ctx.yes || args.flags.yes) suppress = 'on'
-    else if (canPrompt()) suppress = askAboutConnector(dir) ? 'on' : 'skip'
+    else if (canPrompt()) { asked = true; suppress = askAboutConnector() ? 'on' : 'skip' }
   }
 
   const result = applyActivation(dir, active, owned, { suppress })
@@ -1428,13 +2329,21 @@ function cmdSwitch(args) {
   }
   saveState(state)
 
+  // Offer the committed-set question only after the switch has actually
+  // applied, so a "no" leaves a working project rather than a half-done one.
+  let write = Boolean(args.flags.write)
+  if (interactive && !write && result.write.ok) {
+    human('')
+    write = askConfirm(`Commit this to ${WICKED_FILE} so teammates get the same set?`)
+  }
+
   let wroteFile = null
-  if (args.flags.write) {
+  if (write) {
     wroteFile = writeWickedFile(dir, active)
   }
 
   const file = readWickedFile(dir)
-  const fileConflict = file && !args.flags.write &&
+  const fileConflict = file && !write &&
     !sameList([...new Set(file.entries.map((e) => toServerName(e, prefix())))].filter((n) => owned.includes(n)), active)
 
   if (ctx.json) {
@@ -1457,7 +2366,7 @@ function cmdSwitch(args) {
   human(`${sym.ok} ${active.length === 0 ? 'No Webflow connections' : active.join(', ')} active in ${dir}`)
   if (result.disabled.length) human(`  disabled here: ${result.disabled.join(', ')}`)
   if (wroteFile) human(`  wrote ${WICKED_FILE} — commit it and teammates get the same set`)
-  reportConnector(result.connector, active)
+  reportConnector(result.connector, active, { asked })
 
   if (fileConflict) {
     human('')
@@ -1465,11 +2374,52 @@ function cmdSwitch(args) {
     human(`   This switch will be undone next session. Re-run with --write to update the file.`)
   }
 
+  if (interactive) echoCommand(switchArgv({ active, owned, write, pfx: prefix() }))
+
   human('')
   // MCP connections are resolved and started BEFORE any hook or CLI write can
   // land, so the session you are in already loaded what it loaded.
   human('This session is unchanged — start a new session for this set to load.')
   return EXIT.OK
+}
+
+/**
+ * The switch picker.
+ *
+ * Deliberately state-only: no `mcp list`, no subprocess, no network. `switch`
+ * is the one command that runs on a plane, and opening a picker should not be
+ * the thing that changes that. Health comes from the last verification we
+ * recorded rather than a live check.
+ *
+ * Returns null when cancelled — the caller must not confuse that with [].
+ */
+function pickActiveSet(dir, state, owned) {
+  const disabled = new Set(disabledServersFor(dir))
+  const items = owned.map((name) => {
+    const conn = state.connections[name]
+    const v = conn?.lastVerified
+    const reach = !v ? 'never checked' : v.ok ? describeSites(v.sites) : 'last check failed'
+    return { label: name, hint: `${conn?.label ?? '—'} · ${reach}` }
+  })
+
+  const result = pick({
+    title: `Which clients load in ${dir}?`,
+    items,
+    multi: true,
+    // Pre-checked = what is active right now, so confirming with no changes is
+    // a no-op and the picker is safe to open just to look.
+    checked: owned.map((n) => !disabled.has(n)),
+    footer: (s) => {
+      const n = pickedIndexes(s).length
+      return n === 0
+        ? 'nothing selected · no Webflow tools load here'
+        // The recurring cost of this tool, at the moment of choosing rather
+        // than in a README nobody rereads.
+        : `${n} selected · about 30 tools loaded per connection`
+    },
+  })
+
+  return result.cancelled ? null : result.indexes.map((i) => owned[i])
 }
 
 function writeWickedFile(dir, active) {
@@ -1489,31 +2439,54 @@ function writeWickedFile(dir, active) {
   return p
 }
 
-/** The one write in this tool that affects software we were never asked about. */
-function askAboutConnector(dir) {
-  human('')
-  human(`${sym.warn} With no Webflow connection active, Claude Code unhides its own`)
-  human(`   "claude.ai Webflow" connector against the same URL — so a different,`)
-  human(`   unscoped grant can reach your sites from this project anyway.`)
-  human('')
-  human(`   The only thing that closes that is "${CONNECTOR_KEY}": true in`)
-  human(`   ${settingsPath(dir)}, and it is all-or-nothing:`)
-  human(`   it disables EVERY claude.ai connector here (Figma, Linear, Notion — all of them).`)
-  human('')
-  const answer = promptLine('   Write it? [y/N] ')
-  return /^y(es)?$/i.test(String(answer ?? '').trim())
+/**
+ * The one write in this tool that affects software we were never asked about,
+ * so it is always a question and never a default.
+ *
+ * The question is about the consequence, not the mechanism. An earlier version
+ * of this screen led with the settings key and the file path and the words
+ * "all-or-nothing", which is the implementation talking: it asks someone to
+ * weigh a decision by reading our plumbing. What actually matters is that one
+ * option leaves the built-in connector available and the other switches off
+ * every claude.ai connector in the project. Both are reasonable; neither is
+ * the fix for a problem.
+ */
+function askAboutConnector() {
+  OUT('\n')
+  OUT(`  No Webflow connections active here.\n`)
+  OUT('\n')
+  OUT(`  Claude Code's own Webflow connector can still load in this project — a\n`)
+  OUT(`  separate connection with its own authorization, not one wwm scoped.\n`)
+  OUT(`  Turning it off also turns off Figma, Linear and Notion here.\n`)
+  OUT('\n')
+
+  // The consequence lives in the prose above rather than in row hints: hints
+  // share a line with the label and get truncated on an 80-column terminal,
+  // which would clip exactly the part that makes this a real decision.
+  const choice = pick({
+    items: [
+      { label: 'Leave it' },
+      { label: 'Turn off claude.ai connectors in this project' },
+    ],
+  })
+
+  // Escaping is not consent. Anything other than picking the second row leaves
+  // the project alone.
+  return !choice.cancelled && choice.indexes[0] === 1
 }
 
-function reportConnector(connector, active) {
+function reportConnector(connector, active, { asked = false } = {}) {
   switch (connector.state) {
     case 'suppressed':
-      human(`  ${sym.ok} wrote ${CONNECTOR_KEY} — every claude.ai connector is off in this project`)
+      human(`  ${sym.ok} claude.ai connectors are off in this project`)
       break
     case 'restored':
-      human(`  ${sym.ok} removed ${CONNECTOR_KEY} — your other claude.ai connectors work here again`)
+      human(`  ${sym.ok} your claude.ai connectors work here again`)
       break
     case 'hole open':
-      human(`  ${sym.warn} "claude.ai Webflow" can still load here — that grant is not scoped by wwm`)
+      // Silent when they were just asked and said no. Re-stating it there is
+      // the tool arguing with a choice the user made one keystroke ago.
+      if (!asked) human(`  Claude Code's own Webflow connector can still load here.`)
       break
     case 'failed':
       human(`  ${sym.bad} could not update ${CONNECTOR_KEY}: ${connector.reason}`)
@@ -1658,10 +2631,11 @@ export function parseArgv(argv) {
 
 const USAGE = `wwm — per-client Webflow MCP connections for Claude Code
 
+  wwm                      dashboard + menu (in a terminal; this text otherwise)
   wwm connect [<slug>]     add + authorize + verify, one flow (asks if no slug)
-  wwm verify [<slug>]      headless scope check (no slug = --all)
+  wwm verify [<slug>]      headless scope check (picker in a terminal, else --all)
   wwm status               health + scope + activation state
-  wwm switch <slug>...     set the connections active in this project
+  wwm switch [<slug>...]   set the connections active in this project
                            (--all | --none | --write to commit the set)
   wwm activate --for-cwd   apply this project's set (the SessionStart hook)
   wwm remove <slug>        logout + remove (destroys the grant)
@@ -1698,6 +2672,11 @@ function main(argv) {
   if (parsed.flags.version || command === 'version') return cmdVersion()
 
   if (!command) {
+    // A terminal gets the dashboard and a menu. Everything else — piped,
+    // scripted, --json, --quiet, --yes, the agent's Bash tool, CI — keeps the
+    // old contract exactly: usage on stdout, exit 2. Nothing automated can
+    // start hanging on a prompt because of this.
+    if (canPrompt()) return cmdMenu()
     process.stdout.write(USAGE)
     return EXIT.USAGE
   }

@@ -15,9 +15,11 @@ What a connection reaches is decided by the user's ticks on Webflow's consent sc
 
 ## Steps
 
-1. Run `wwm verify <slug> --json`, or `wwm verify --json` for all.
-2. This spends real money on the user's Claude account — roughly $0.04 and 7–11 seconds per connection. Before verifying more than a handful, say what it will cost and confirm.
-3. Read `results[]`. Each entry has `ok`, `sites`, `total`, `singleSite`, `workspaceIds`, and `reason`.
+1. **Check what is already known first.** `wwm status --json` costs nothing and carries `sites` and `verifiedAt` for every connection. If the user's question is answered by a result from this morning, answer it and say how old it is — do not re-buy it.
+2. Run `wwm verify <slug> --json` for a named connection, or `wwm verify --json` for all.
+3. This spends real money on the user's Claude account — roughly $0.04 and 7–11 seconds per connection. **Before checking more than one, state the total and wait for a yes**: five connections is about $0.20 and a minute. Never let "verify everything" run because it was the shortest thing to type.
+4. Prefer `wwm verify --max-age 24h` when re-checking in bulk — it re-runs only what has gone stale and reuses the rest, which is usually the difference between $0.04 and $0.40.
+5. Read `results[]`. Each entry has `ok`, `sites`, `total`, `singleSite`, `workspaceIds`, `reason`, and `cached`. A `cached: true` entry was reused, not re-bought — say so when reporting its age.
 
 ## Reporting
 
