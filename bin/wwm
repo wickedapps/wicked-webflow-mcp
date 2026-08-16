@@ -24,7 +24,23 @@ export const DEFAULT_PREFIX = 'wf-'
 export const PLUGIN_ID = 'wicked-webflow-mcp'
 // npm ships only this file, so the version cannot be read from package.json.
 // Bump in lockstep with package.json, plugin.json, and marketplace.json.
+// `node scripts/release.mjs stamp <version>` does all of them at once.
 export const VERSION = '0.5.1'
+
+/**
+ * The shape of `--json` output, versioned independently of VERSION.
+ *
+ * Every payload carries this as its first key. Consumers that are not this
+ * repo — the desktop app, anyone scripting against `wwm` — read it and refuse
+ * to guess when it is a number they do not know.
+ *
+ * Bump ONLY on a breaking change: a field removed, renamed, retyped, or given
+ * a new meaning. Adding a field is not breaking; consumers must ignore keys
+ * they do not recognise. The exact key set of every payload is pinned in
+ * test/schema.test.js, so any change to output fails there first and this
+ * decision gets made deliberately rather than noticed in production.
+ */
+export const SCHEMA_VERSION = 1
 
 export const EXIT = {
   OK: 0,
@@ -795,8 +811,12 @@ function human(msg = '') {
   process.stderr.write(msg + '\n')
 }
 
+/**
+ * The only writer to stdout. schemaVersion is stamped here rather than at the
+ * dozen call sites, so a new command cannot forget it.
+ */
 function emitJson(obj) {
-  process.stdout.write(JSON.stringify(obj, null, 2) + '\n')
+  process.stdout.write(JSON.stringify({ schemaVersion: SCHEMA_VERSION, ...obj }, null, 2) + '\n')
 }
 
 const sym = { ok: '✔', warn: '⚠', bad: '✘', dot: '●', ring: '○' }

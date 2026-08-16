@@ -14,7 +14,9 @@
   },
   "scripts": {
     "test": "node --test test/*.test.js",
-    "prepublishOnly": "npm test"
+    "version:check": "node scripts/release.mjs check",
+    "release": "node scripts/release.mjs stamp",
+    "prepublishOnly": "npm run version:check && npm test"
   },
   "repository": {
     "type": "git",

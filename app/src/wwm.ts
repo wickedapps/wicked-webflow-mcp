@@ -1,0 +1,254 @@
+// Typed client for the CLI.
+//
+// These shapes are a declared contract, not a guess: bin/wwm stamps every
+// --json payload with SCHEMA_VERSION, and test/schema.test.js pins the exact
+// key set of each one. If a field here stops matching the CLI, that suite
+// fails before a release does.
+//
+// When bumping EXPECTED_SCHEMA_VERSION, update the interfaces below in the
+// same commit — they are the other half of the same contract.
+
+import { invoke } from '@tauri-apps/api/core'
+
+/**
+ * The CLI --json schema this build speaks (bin/wwm's SCHEMA_VERSION).
+ *
+ * The app and the CLI install separately and upgrade separately, so they will
+ * disagree eventually. Better one clear sentence about which to upgrade than a
+ * screen of fields that silently read `undefined`.
+ */
+export const EXPECTED_SCHEMA_VERSION = 1
+
+/** Stamped on every payload by bin/wwm's emitJson. Always the first key. */
+interface Envelope {
+  schemaVersion: number
+}
+
+export type Health = 'connected' | 'needs_auth' | 'failed' | 'pending_approval' | 'unknown'
+
+export interface ServerRow {
+  server: string
+  label: string
+  health: Health
+  statusText: string
+  /** Site display names from the last successful verify. `null` means never verified — not "verified and empty". */
+  sites: string[] | null
+  workspaceIds: string[]
+  singleSite: boolean | null
+  verifiedAt: string | null
+  verifyFailed: boolean
+  /** Read from disabledMcpServers, not from `mcp list` — a disabled server still reports Connected. */
+  active: boolean
+}
+
+export interface Activation {
+  source: string
+  connectorsSuppressed: boolean
+  /** `.wicked-webflow` disagrees with what is applied now, and the file wins at next session start. */
+  fileConflict: boolean
+}
+
+export interface StatusResult extends Envelope {
+  ok: true
+  cwd: string
+  servers: ServerRow[]
+  activation: Activation
+  cached: boolean
+}
+
+export interface ConnectResult extends Envelope {
+  ok: boolean
+  server: string
+  label: string
+  scope: string
+  /** Present when the CLI could not authorize itself. Always, from here: a GUI has no TTY either. */
+  loginCommand?: string
+  authorized?: boolean
+  verified?: unknown
+}
+
+export interface SwitchResult extends Envelope {
+  ok: boolean
+  cwd: string
+  active: string[]
+  disabled: string[]
+  connector?: string
+  wroteFile?: string | null
+  /** `.wicked-webflow` disagrees with this switch, and the file wins at next session start. */
+  fileConflict: boolean
+  restartRequired?: boolean
+  error?: string | null
+}
+
+export interface VerifyResult extends Envelope {
+  ok: boolean
+  results: Array<{
+    server: string
+    ok: boolean
+    sites?: string[]
+    workspaceIds?: string[]
+    singleSite?: boolean
+    reason?: string
+  }>
+}
+
+interface RawOutput {
+  code: number
+  json: unknown
+  stderr: string
+}
+
+/** bin/wwm's EXIT map, for messages worth phrasing better than "exit 4". */
+const EXIT_MEANING: Record<number, string> = {
+  2: 'The app called wwm incorrectly.',
+  3: 'Preflight failed — check that the `claude` CLI is installed and current.',
+  4: 'A connection with that name already exists.',
+  6: 'Verification failed.',
+  7: 'wwm could not parse output from the `claude` CLI. It is probably a version ahead of this build.',
+}
+
+export class WwmError extends Error {
+  constructor(
+    message: string,
+    readonly code: number,
+    readonly detail: string | null = null,
+  ) {
+    super(message)
+    this.name = 'WwmError'
+  }
+}
+
+/**
+ * Checked before anything else is read: on a version we do not know, the rest
+ * of the payload — including the error envelope — may not mean what we think.
+ */
+function assertSchema(body: Record<string, unknown>, command: string): void {
+  const got = body.schemaVersion
+  if (got === EXPECTED_SCHEMA_VERSION) return
+
+  if (got === undefined) {
+    throw new WwmError(
+      `The installed wwm is older than this app: its \`${command} --json\` output carries no ` +
+        `schemaVersion. Upgrade with \`npm install -g wicked-webflow-mcp\`.`,
+      -1,
+    )
+  }
+  throw new WwmError(
+    `wwm speaks --json schema ${String(got)}; this app was built for ` +
+      `${EXPECTED_SCHEMA_VERSION}. Upgrade whichever is older — the CLI with ` +
+      `\`npm install -g wicked-webflow-mcp\`, or this app from its release page.`,
+    -1,
+  )
+}
+
+/**
+ * A project directory, or null for "none chosen yet".
+ *
+ * Threaded explicitly through every call rather than held as module state:
+ * which directory a command ran in is the difference between two completely
+ * different answers from `status`, and it should be impossible to write one
+ * without saying which.
+ */
+export type Project = string | null
+
+/**
+ * Run a wwm command in `project`. `--json` is appended by the Rust side if
+ * absent; a null project runs in HOME.
+ *
+ * A non-zero exit still carries parsed JSON — every failure path in the CLI
+ * emits `{ok: false, error, detail, exitCode}` — so failures arrive here as a
+ * structured WwmError rather than a wall of stderr.
+ */
+export async function run<T>(args: string[], project: Project = null): Promise<T> {
+  const out = await invoke<RawOutput>('wwm_run', { args, cwd: project })
+
+  if (out.json === null || typeof out.json !== 'object') {
+    const hint = EXIT_MEANING[out.code]
+    throw new WwmError(
+      out.stderr.trim() || hint || `wwm exited ${out.code} with no output.`,
+      out.code,
+    )
+  }
+
+  const body = out.json as Record<string, unknown>
+  assertSchema(body, args[0] ?? 'wwm')
+
+  if (body.ok === false) {
+    throw new WwmError(
+      String(body.error ?? EXIT_MEANING[out.code] ?? `wwm exited ${out.code}.`),
+      out.code,
+      body.detail == null ? null : String(body.detail),
+    )
+  }
+
+  return body as T
+}
+
+export interface Located {
+  path: string
+  source: 'WWM_BIN' | 'bundled' | 'PATH'
+  version: string | null
+  /** null on any wwm predating the contract. */
+  schemaVersion: number | null
+  path_env: string | null
+  /** For abbreviating project paths to `~/…`. */
+  home: string | null
+  stderr: string
+}
+
+export const locate = () => invoke<Located>('wwm_locate')
+
+export const status = (project: Project, refresh = false) =>
+  run<StatusResult>(refresh ? ['status', '--refresh'] : ['status'], project)
+
+/**
+ * Add the server. Never authorizes — with no TTY the CLI returns the login
+ * command instead, which is exactly what LoginTerminal then runs on a pty.
+ *
+ * Registration is user-scope, so this does not depend on the project; it is
+ * still run there so that the verify `connect` performs, and any path the CLI
+ * prints, are about the directory on screen.
+ */
+export const connect = (project: Project, slug: string, label?: string) =>
+  run<ConnectResult>(
+    ['connect', slug, ...(label ? ['--label', label] : []), '--print-command'],
+    project,
+  )
+
+/**
+ * Set the connections active in `project`.
+ *
+ * `switch` takes slugs or full server names — toServerName() normalizes both.
+ * It writes `projects[<project>].disabledMcpServers` in ~/.claude.json, so the
+ * directory is not cosmetic here: it is what gets written.
+ */
+export const switchTo = (project: Project, servers: string[]) =>
+  run<SwitchResult>(servers.length === 0 ? ['switch', '--none'] : ['switch', ...servers], project)
+
+export const verify = (project: Project, server?: string) =>
+  run<VerifyResult>(server ? ['verify', server] : ['verify'], project)
+
+/** Destroys the OAuth grant at every scope. Not the per-project off switch — that is `switchTo`. */
+export const remove = (project: Project, server: string) =>
+  run<{ ok: boolean }>(['remove', server, '--yes'], project)
+
+// --- slug preview -----------------------------------------------------------
+//
+// A mirror of slugify()/validateSlug() in bin/wwm:333-352, so the Add-client
+// form can show what a typed name becomes before it is submitted. The CLI is
+// still the authority — it revalidates and exits 2 on anything bad — so a
+// drift here costs a wrong preview, never a wrong connection.
+
+export const slugify = (input: string): string =>
+  input
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+
+/** Server names become tool-name prefixes, so every character is paid for in every session. */
+export function validateSlug(slug: string): string | null {
+  if (!slug) return 'empty once punctuation and spaces are removed'
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(slug)) return 'must be lowercase letters, digits and hyphens'
+  if (slug.length > 32) return 'longer than 32 characters'
+  return null
+}

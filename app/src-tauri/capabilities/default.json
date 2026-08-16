@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Core window and event access, plus the folder picker. The wwm bridge and the login pty are application commands, not plugin commands, so they need no permission entry here — everything that touches the shell goes through Rust we own. `dialog:allow-open` is the exception: it is a plugin command, and it is scoped to open only. Nothing in this app writes a file through a dialog.",
+  "windows": ["main"],
+  "permissions": ["core:default", "dialog:allow-open"]
+}

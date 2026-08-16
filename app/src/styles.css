@@ -1,0 +1,336 @@
+:root {
+  --bg: #0b0d10;
+  --panel: #14181d;
+  --line: #232a32;
+  --fg: #d7dbe0;
+  --muted: #7c8794;
+  --ok: #6ee7b7;
+  --warn: #fbbf24;
+  --bad: #f87171;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px/1.5 ui-sans-serif, -apple-system, system-ui, sans-serif;
+}
+
+.mono,
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.app {
+  padding: 20px 24px 40px;
+}
+
+.top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+h1 {
+  margin: 0 0 4px;
+  font-size: 17px;
+  font-weight: 600;
+}
+
+h2 {
+  margin: 0 0 6px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+p {
+  margin: 0 0 10px;
+}
+
+.muted {
+  color: var(--muted);
+}
+.ok {
+  color: var(--ok);
+}
+.warn {
+  color: var(--warn);
+}
+.bad {
+  color: var(--bad);
+}
+
+.actions,
+.row-actions {
+  display: flex;
+  gap: 8px;
+}
+
+button {
+  background: var(--panel);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 5px 11px;
+  font: inherit;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: #3a4450;
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0 10px 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+td {
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: middle;
+}
+
+.error,
+.warn-banner {
+  border-radius: 6px;
+  padding: 9px 12px;
+  margin-bottom: 14px;
+}
+
+.error {
+  background: #2a1618;
+  border: 1px solid #5c2b2f;
+  color: #fca5a5;
+}
+
+.warn-banner {
+  background: #2a2214;
+  border: 1px solid #5c4a2b;
+  color: #fcd34d;
+}
+
+.empty,
+.note {
+  margin-top: 16px;
+}
+
+/* --- project bar --- */
+
+.projectbar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px 8px 12px;
+  margin-bottom: 16px;
+}
+
+/* Nothing is broken without a folder — the toggles are just inert until then. */
+.projectbar.unset {
+  border-style: dashed;
+}
+
+.projectbar-label {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.projectbar-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl; /* keep the tail — the folder name — when it clips */
+  text-align: left;
+}
+
+.projectbar-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+button.ghost {
+  background: none;
+}
+
+.menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 10px;
+  z-index: 10;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  min-width: 260px;
+  max-width: 460px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 10px 30px rgb(0 0 0 / 45%);
+}
+
+.menu li {
+  display: flex;
+  align-items: center;
+}
+
+.menu-item {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  background: none;
+  border: none;
+  border-radius: 5px;
+  padding: 6px 8px;
+  text-align: left;
+}
+
+.menu-item:hover {
+  background: #1c2229;
+}
+
+.menu-path,
+.menu-name {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.menu-forget {
+  background: none;
+  border: none;
+  color: var(--muted);
+  padding: 4px 8px;
+}
+
+.menu-forget:hover:not(:disabled) {
+  color: var(--fg);
+}
+
+/* --- forms --- */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.field span {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+input[type='text'],
+.field input {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 7px 9px;
+  font: inherit;
+}
+
+.field input:focus {
+  outline: none;
+  border-color: #3a4450;
+}
+
+/* Reserves its line so the card does not jump as validation appears. */
+.preview {
+  min-height: 18px;
+  margin: 0;
+}
+
+.sheet-card .error {
+  margin: 0;
+  min-height: 18px;
+  background: none;
+  border: none;
+  padding: 0;
+}
+
+/* --- login sheet --- */
+
+.sheet {
+  position: fixed;
+  inset: 0;
+  background: rgb(0 0 0 / 60%);
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.sheet-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  width: min(860px, 100%);
+  max-height: 100%;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.sheet-card.narrow {
+  width: min(440px, 100%);
+}
+
+.sheet-card header p {
+  max-width: 68ch;
+  margin: 0;
+}
+
+.term {
+  height: 340px;
+  background: #0b0d10;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px;
+  overflow: hidden;
+}
+
+.sheet-card footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
