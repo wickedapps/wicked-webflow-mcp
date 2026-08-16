@@ -76,6 +76,8 @@ export interface SwitchResult extends Envelope {
   wroteFile?: string | null
   /** `.wicked-webflow` disagrees with this switch, and the file wins at next session start. */
   fileConflict: boolean
+  /** Same values `status` reports: `.wicked-webflow`, `plugin state`, or `default (all)`. */
+  source: string
   restartRequired?: boolean
   error?: string | null
 }
@@ -224,6 +226,14 @@ export const connect = (project: Project, slug: string, label?: string) =>
  */
 export const switchTo = (project: Project, servers: string[]) =>
   run<SwitchResult>(servers.length === 0 ? ['switch', '--none'] : ['switch', ...servers], project)
+
+/**
+ * Forget this folder's remembered set so every connection loads, including ones
+ * added later. `--all` is not this: it snapshots the current names into plugin
+ * state, and a connection added afterwards stays off.
+ */
+export const switchDefault = (project: Project) =>
+  run<SwitchResult>(['switch', '--default'], project)
 
 export const verify = (project: Project, server?: string) =>
   run<VerifyResult>(server ? ['verify', server] : ['verify'], project)

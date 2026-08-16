@@ -9,7 +9,7 @@
 import { open } from '@tauri-apps/plugin-dialog'
 
 const KEY = 'wwm.projects.v1'
-const MAX_RECENTS = 8
+const MAX_RECENTS = 5
 
 /**
  * Current project and history in one record.
@@ -33,7 +33,9 @@ export function load(): Projects {
     const { current, recents } = parsed as Partial<Projects>
     return {
       current: typeof current === 'string' ? current : null,
-      recents: Array.isArray(recents) ? recents.filter((r) => typeof r === 'string') : [],
+      recents: Array.isArray(recents)
+        ? recents.filter((r) => typeof r === 'string').slice(0, MAX_RECENTS)
+        : [],
     }
   } catch {
     // A corrupt or unavailable store is not worth failing to launch over.

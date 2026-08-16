@@ -42,7 +42,7 @@ export function AddClient({ taken, busy, onCancel, onSubmit }: Props) {
       <form className="sheet-card narrow" onSubmit={submit}>
         <header>
           <div>
-            <h2>Add a client</h2>
+            <h2>Add a new connection</h2>
             <p className="muted">
               Registers a new Webflow connection under its own name, so it gets its own
               authorization. Existing connections stay authorized.
@@ -51,7 +51,7 @@ export function AddClient({ taken, busy, onCancel, onSubmit }: Props) {
         </header>
 
         <label className="field">
-          <span>Client name</span>
+          <span>Connection name</span>
           <input
             autoFocus
             value={name}
@@ -59,22 +59,21 @@ export function AddClient({ taken, busy, onCancel, onSubmit }: Props) {
             disabled={busy}
             onChange={(e) => setName(e.target.value)}
           />
+          {slug !== '' && (
+            <p className={problem || collides ? 'error' : 'muted mono preview'}>
+              {problem
+                ? `That name is ${problem}.`
+                : collides
+                  ? 'Connection with the same name already exists'
+                  : `→ creates ${server}`}
+            </p>
+          )}
         </label>
 
-        <p className={problem || collides ? 'error' : 'muted mono preview'}>
-          {slug === ''
-            ? ' '
-            : problem
-              ? `That name is ${problem}.`
-              : collides
-                ? `${server} already exists. Pick another name, or use the existing connection.`
-                : `→ creates ${server}`}
-        </p>
-
-        <footer>
-          <span className="muted">
+        <footer className="sheet-foot">
+          <p className="muted">
             You will be asked to authorize it next, in a terminal window here.
-          </span>
+          </p>
           <div className="actions">
             <button type="button" onClick={onCancel} disabled={busy}>
               Cancel

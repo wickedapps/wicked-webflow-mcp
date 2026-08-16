@@ -9,9 +9,10 @@ Make "$ARGUMENTS" the active connection(s) for this project, deactivating the re
 
 1. If you are unsure which connections exist, run `wwm status --json` first and match "$ARGUMENTS" against the labels and server names it returns.
 2. Run `wwm switch <slug>... --json`. Variants:
-   - `--all` — everything active here.
+   - `--all` — every current connection, remembered as this project's set. A connection added later stays off here.
+   - `--default` — forget this project's remembered set so every connection loads, including ones added later. Use this when they want to undo a per-project switch, not when they want to snapshot "everything on".
    - `--none` — no Webflow connections here.
-   - `--write` — also write `.wicked-webflow`, so the set travels with the repo and a teammate's session picks it up. Offer this when the project is a git repo and the user is setting up a client project rather than experimenting.
+   - `--write` — also write `.wicked-webflow`, so the set travels with the repo and a teammate's session picks it up. Offer this when the project is a git repo and the user is setting up a client project rather than experimenting. Do not combine with `--default`.
 3. **Tell the user the current session is unchanged.** MCP connections are resolved and started before anything we can write, so the set applies from their *next* session. Do not imply the tools disappeared just now — they can see the old ones in the same session and will think the command failed.
 4. If the JSON reports `fileConflict: true`, say so: `.wicked-webflow` lists a different set and wins at session start, so this switch is undone next session unless they re-run with `--write`.
 

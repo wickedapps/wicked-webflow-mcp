@@ -115,7 +115,8 @@ So keep every client authorized, and load only the ones a project needs:
 ```bash
 wwm switch dino           # only Dino Studios loads in this directory
 wwm switch dino --write   # …and commit that choice as .wicked-webflow
-wwm switch --all          # everything, here
+wwm switch --all          # everything currently connected, remembered as this project's set
+wwm switch --default      # forget the remembered set — every connection loads, including ones added later
 wwm switch --none         # no Webflow connections here
 ```
 

@@ -1,17 +1,20 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useState, type ReactNode } from 'react'
 
 import { AddClient } from './AddClient'
+import { ConfirmRemove } from './ConfirmRemove'
 import { LoginTerminal } from './LoginTerminal'
 import { ProjectBar } from './ProjectBar'
 import * as projects from './project'
 import * as wwm from './wwm'
 
+type Tab = 'connections' | 'projects'
+
 const HEALTH_LABEL: Record<wwm.Health, string> = {
-  connected: 'connected',
-  needs_auth: 'needs auth',
-  failed: 'failed',
-  pending_approval: 'pending approval',
-  unknown: 'unknown',
+  connected: 'Connected',
+  needs_auth: 'Needs auth',
+  failed: 'Failed',
+  pending_approval: 'Pending approval',
+  unknown: 'Unknown',
 }
 
 function relative(iso: string | null): string {
@@ -25,6 +28,58 @@ function relative(iso: string | null): string {
   return `${Math.round(hours / 24)}d ago`
 }
 
+function StatusIcon({ kind }: { kind: 'ok' | 'bad' | 'warn' }) {
+  if (kind === 'ok') {
+    return (
+      <svg className="status-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <circle cx="8" cy="8" r="6.25" stroke="currentColor" strokeWidth="1.5" />
+        <path
+          d="M5.25 8.15 7.1 10l3.65-4.4"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    )
+  }
+  if (kind === 'bad') {
+    return (
+      <svg className="status-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <circle cx="8" cy="8" r="6.25" stroke="currentColor" strokeWidth="1.5" />
+        <path d="M6 6l4 4M10 6l-4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      </svg>
+    )
+  }
+  return (
+    <svg className="status-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path
+        d="M8 2.75 14.25 13.5H1.75L8 2.75Z"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+      />
+      <path d="M8 6.5v3.25" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      <path d="M8 11.75h.01" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+function Status({
+  kind,
+  children,
+}: {
+  kind: 'ok' | 'bad' | 'warn'
+  children: ReactNode
+}) {
+  return (
+    <span className={`status ${kind}`}>
+      <StatusIcon kind={kind} />
+      {children}
+    </span>
+  )
+}
+
 /**
  * Sites the last verify found — or an honest absence.
  *
@@ -32,14 +87,29 @@ function relative(iso: string | null): string {
  * fine. The CLI and the skills are both careful about this; so is the UI.
  */
 function Sites({ row }: { row: wwm.ServerRow }) {
-  if (row.verifyFailed) return <span className="bad">last verify failed</span>
-  if (row.sites === null) return <span className="muted">unverified</span>
-  if (row.sites.length === 0) return <span className="warn">no sites</span>
+  if (row.sites === null) return <span className="muted">Unverified</span>
+  if (row.sites.length === 0) return <span className="warn">No sites</span>
   return (
     <span>
       {row.sites.join(', ')} <span className="muted">({relative(row.verifiedAt)})</span>
     </span>
   )
+}
+
+/** Health is the MCP handshake; verify is what the grant can actually see. */
+function ConnectionStatus({ row }: { row: wwm.ServerRow }) {
+  if (row.verifyFailed) return <Status kind="bad">Verification failed</Status>
+  return (
+    <>
+      <Status kind={row.health === 'connected' ? 'ok' : 'warn'}>{HEALTH_LABEL[row.health]}</Status>
+      <span className="muted">·</span>
+      <Sites row={row} />
+    </>
+  )
+}
+
+function formatSource(source: string): string {
+  return source === 'default (all)' ? 'default' : source
 }
 
 function applyActive(data: wwm.StatusResult, active: string[]): wwm.StatusResult {
@@ -57,6 +127,7 @@ function applySwitch(data: wwm.StatusResult, res: wwm.SwitchResult): wwm.StatusR
     ...next,
     activation: {
       ...next.activation,
+      source: res.source ?? next.activation.source,
       fileConflict: res.fileConflict,
       connectorsSuppressed:
         res.connector === 'suppressed'
@@ -68,13 +139,29 @@ function applySwitch(data: wwm.StatusResult, res: wwm.SwitchResult): wwm.StatusR
   }
 }
 
+function ListWrap({ status, children }: { status: string | null; children: ReactNode }) {
+  return (
+    <div className={`cards${status ? ' loading' : ''}`} aria-busy={status !== null}>
+      {children}
+      {status && (
+        <div className="list-loading">
+          <span className="spinner" aria-hidden="true" />
+          {status}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function App() {
+  const [tab, setTab] = useState<Tab>('connections')
   const [located, setLocated] = useState<wwm.Located | null>(null)
   const [data, setData] = useState<wwm.StatusResult | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [login, setLogin] = useState<{ server: string; label: string } | null>(null)
   const [adding, setAdding] = useState(false)
+  const [removing, setRemoving] = useState<{ server: string; label: string } | null>(null)
   const [store, setStore] = useState<projects.Projects>(() => projects.load())
   const [pending, setPending] = useState<string | null>(null)
 
@@ -105,18 +192,22 @@ export default function App() {
   }, [refresh])
 
   /**
-   * Run something, then re-read status from cache.
+   * Verify, then always re-read status.
    *
-   * `--refresh` is the Refresh button: it forces `claude mcp list`, which
-   * health-checks every configured server. After a mutation the CLI has
-   * already invalidated or updated what changed; a live list is a freeze,
-   * not a correctness requirement.
+   * A failed verify still writes lastVerified into state (ok: false) before it
+   * exits 6. If we skipped the reread, the card would keep the last successful
+   * site list and still say connected — which is true of the handshake, and
+   * the wrong thing to lead with.
    */
-  const act = async (what: string, fn: () => Promise<unknown>) => {
-    setBusy(what)
+  const verifyServer = async (server: string) => {
+    setBusy('Verifying')
     try {
-      await fn()
+      await wwm.verify(project, server)
       setError(null)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+    try {
       setData(await wwm.status(project, false))
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -185,6 +276,25 @@ export default function App() {
     })()
   }
 
+  const resetToDefault = () => {
+    if (!data || !project || busy) return
+    const previous = data
+    setData(applyActive(data, data.servers.map((s) => s.server)))
+    setBusy('Switching')
+    void (async () => {
+      try {
+        const res = await wwm.switchDefault(project)
+        setData((cur) => (cur ? applySwitch(cur, res) : cur))
+        setError(null)
+      } catch (e) {
+        setData(previous)
+        setError(e instanceof Error ? e.message : String(e))
+      } finally {
+        setBusy(null)
+      }
+    })()
+  }
+
   const addClient = (slug: string, label: string) =>
     void (async () => {
       setBusy('Connecting')
@@ -225,74 +335,44 @@ export default function App() {
       }
     })()
 
+  const confirmRemove = () => {
+    if (!removing) return
+    const { server } = removing
+    void (async () => {
+      setBusy('Removing')
+      try {
+        await wwm.remove(project, server)
+        setData((cur) =>
+          cur ? { ...cur, servers: cur.servers.filter((s) => s.server !== server) } : cur,
+        )
+        setError(null)
+        setRemoving(null)
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e))
+      } finally {
+        setBusy(null)
+      }
+    })()
+  }
+
   return (
     <div className="app">
-      <header className="top">
-        <div>
-          <h1>Wicked Webflow MCP Manager</h1>
-          {data ? (
-            <p className="muted">
-              {data.servers.length} connection{data.servers.length === 1 ? '' : 's'}
-            </p>
-          ) : (
-            busy === 'Loading' && <p className="muted">Loading…</p>
-          )}
-        </div>
-        <div className="actions">
-          <button className="primary" onClick={() => setAdding(true)} disabled={busy !== null}>
-            Add new
-          </button>
-          <button
-            className="icon-btn"
-            onClick={() => void refresh(project, true)}
-            disabled={busy !== null}
-            aria-label="Refresh"
-            title="Refresh"
-          >
-            <svg
-              className={busy === 'Loading' ? 'spin' : undefined}
-              width="16"
-              height="16"
-              viewBox="0 0 16 16"
-              fill="none"
-              aria-hidden="true"
-            >
-              <path
-                d="M13.5 8A5.5 5.5 0 1 1 11.4 3.4L14 6"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-              <path
-                d="M14 2.5V6h-3.5"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-          </button>
-        </div>
-      </header>
-
-      <ProjectBar
-        current={pending ?? project}
-        recents={store.recents}
-        home={located?.home ?? null}
-        busy={busy !== null}
-        loading={pending !== null}
-        summary={
-          pending
-            ? 'Loading…'
-            : project && data
-              ? `${data.servers.filter((s) => s.active).length} active here (from ${data.activation.source})`
-              : null
-        }
-        onPick={() => void pickProject()}
-        onSelect={(dir) => void useProject(dir)}
-        onForget={(dir) => setStore(projects.forget(dir))}
-      />
+      <nav className="tabs" aria-label="Sections">
+        <button
+          className={`tab${tab === 'connections' ? ' active' : ''}`}
+          aria-current={tab === 'connections' ? 'page' : undefined}
+          onClick={() => setTab('connections')}
+        >
+          Connections
+        </button>
+        <button
+          className={`tab${tab === 'projects' ? ' active' : ''}`}
+          aria-current={tab === 'projects' ? 'page' : undefined}
+          onClick={() => setTab('projects')}
+        >
+          Projects
+        </button>
+      </nav>
 
       {located && located.version === null && (
         <p className="error">
@@ -303,94 +383,199 @@ export default function App() {
       )}
       {error && <p className="error">{error}</p>}
 
-      {project && data?.activation.fileConflict && (
-        <p className="warn-banner">
-          <code>.wicked-webflow</code> lists a different set and wins at session start &mdash; the
-          current selection will be undone next session. Re-run the switch with{' '}
-          <code>--write</code> from the CLI to make it stick.
-        </p>
-      )}
-
-      <div className={`table-wrap${busy === 'Loading' ? ' loading' : ''}`} aria-busy={busy === 'Loading'}>
-        <table>
-          <thead>
-            <tr>
-              <th>Connection</th>
-              <th>Label</th>
-              <th>Health</th>
-              <th>Sites</th>
-              <th>Active here</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {data?.servers.map((row) => (
-              <tr key={row.server}>
-                <td className="mono">{row.server}</td>
-                <td>{row.label}</td>
-                <td className={row.health === 'connected' ? 'ok' : 'warn'}>
-                  {HEALTH_LABEL[row.health]}
-                </td>
-                <td>
-                  <Sites row={row} />
-                </td>
-                <td>
-                  <input
-                    type="checkbox"
-                    checked={project ? row.active : false}
-                    disabled={busy !== null || !project}
-                    title={project ? undefined : 'Choose a project folder first'}
-                    onChange={() => toggle(row)}
+      {tab === 'connections' && (
+        <>
+          <div className="pane-head">
+            {data ? (
+              <h2 className="pane-heading">
+                {data.servers.length} connection{data.servers.length === 1 ? '' : 's'}
+              </h2>
+            ) : (
+              <h2 className="pane-heading">{busy === 'Loading' ? 'Loading…' : '\u00a0'}</h2>
+            )}
+            <div className="actions">
+              <button className="primary" onClick={() => setAdding(true)} disabled={busy !== null}>
+                Add new
+              </button>
+              <button
+                className="icon-btn"
+                onClick={() => void refresh(project, true)}
+                disabled={busy !== null}
+                aria-label="Refresh"
+                title="Refresh"
+              >
+                <svg
+                  className={busy === 'Loading' ? 'spin' : undefined}
+                  width="16"
+                  height="16"
+                  viewBox="0 0 16 16"
+                  fill="none"
+                  aria-hidden="true"
+                >
+                  <path
+                    d="M13.5 8A5.5 5.5 0 1 1 11.4 3.4L14 6"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
                   />
-                </td>
-                <td>
-                  <div className="row-actions">
-                    <button
-                      disabled={busy !== null}
-                      onClick={() => void act('Verifying', () => wwm.verify(project, row.server))}
-                    >
-                      Verify
-                    </button>
-                    {row.health === 'needs_auth' && (
-                      <button
-                        className="primary"
-                        onClick={() => setLogin({ server: row.server, label: row.label })}
-                      >
-                        Authorize
-                      </button>
-                    )}
-                  </div>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {busy === 'Loading' && (
-          <div className="table-loading">
-            <span className="spinner" aria-hidden="true" />
-            Loading…
+                  <path
+                    d="M14 2.5V6h-3.5"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </button>
+            </div>
           </div>
-        )}
-      </div>
+          <ListWrap
+            status={busy === 'Loading' ? 'Loading…' : busy === 'Verifying' ? 'Verifying…' : null}
+          >
+            {data?.servers.map((row) => (
+              <article key={row.server} className="card">
+                <div className="card-body">
+                  <h3 className="card-title">{row.label}</h3>
+                  <p className="card-id mono muted">{row.server}</p>
+                  <p className="card-meta">
+                    <ConnectionStatus row={row} />
+                  </p>
+                </div>
+                <div className="card-actions">
+                  <button
+                    disabled={busy !== null}
+                    onClick={() => void verifyServer(row.server)}
+                  >
+                    Verify
+                  </button>
+                  {row.health === 'needs_auth' && (
+                    <button
+                      className="primary"
+                      onClick={() => setLogin({ server: row.server, label: row.label })}
+                    >
+                      Authorize
+                    </button>
+                  )}
+                  <button
+                    className="icon-btn danger"
+                    disabled={busy !== null}
+                    aria-label={`Remove ${row.label}`}
+                    title="Remove"
+                    onClick={() => setRemoving({ server: row.server, label: row.label })}
+                  >
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                      <path
+                        d="M2.5 4h11M6 4V2.75h4V4M12.5 4v9.25a.75.75 0 0 1-.75.75h-7.5a.75.75 0 0 1-.75-.75V4"
+                        stroke="currentColor"
+                        strokeWidth="1.5"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                      <path
+                        d="M6.5 6.5v5M9.5 6.5v5"
+                        stroke="currentColor"
+                        strokeWidth="1.5"
+                        strokeLinecap="round"
+                      />
+                    </svg>
+                  </button>
+                </div>
+              </article>
+            ))}
+          </ListWrap>
 
-      {data?.servers.length === 0 && (
-        <p className="muted empty">No connections yet. &ldquo;Add new&rdquo; sets one up.</p>
+          {data?.servers.length === 0 && (
+            <p className="muted empty">No connections yet. &ldquo;Add new&rdquo; sets one up.</p>
+          )}
+        </>
       )}
 
-      {/* Health, sites and verify are global facts; only the checkboxes need a
-          directory. Saying so is better than greying a column with no reason. */}
-      {!project && data && data.servers.length > 0 && (
-        <p className="muted note">
-          Choose a project folder to set which of these load there. Connections stay authorized
-          either way &mdash; activation is per&#8209;folder, authorization is not.
-        </p>
-      )}
+      {tab === 'projects' && (
+        <>
+          <ProjectBar
+            current={pending ?? project}
+            recents={store.recents}
+            home={located?.home ?? null}
+            busy={busy !== null}
+            loading={pending !== null}
+            summary={
+              pending
+                ? 'Loading…'
+                : project && data
+                  ? `${data.servers.filter((s) => s.active).length} active here (from ${formatSource(data.activation.source)})`
+                  : null
+            }
+            onPick={() => void pickProject()}
+            onSelect={(dir) => void useProject(dir)}
+            onForget={(dir) => setStore(projects.forget(dir))}
+            onReset={
+              project && !pending && data?.activation.source === 'plugin state'
+                ? resetToDefault
+                : undefined
+            }
+          />
 
-      {project && data && data.servers.every((s) => !s.active) && !data.activation.connectorsSuppressed && (
-        <p className="muted note">
-          With none of ours active, Claude Code&rsquo;s own Webflow connector can load in this
-          project. It is a separate connection with its own authorization.
-        </p>
+          {project && data?.activation.fileConflict && (
+            <p className="warn-banner">
+              <code>.wicked-webflow</code> lists a different set and wins at session start &mdash;
+              the current selection will be undone next session. Re-run the switch with{' '}
+              <code>--write</code> from the CLI to make it stick.
+            </p>
+          )}
+
+          <ListWrap status={busy === 'Loading' ? 'Loading…' : null}>
+            {data?.servers.map((row) => {
+              const on = Boolean(project && row.active)
+              return (
+                <article key={row.server} className="card">
+                  <div className="card-body">
+                    <h3 className="card-title">{row.label}</h3>
+                    <p className="card-id mono muted">{row.server}</p>
+                    <p className="card-meta">
+                      {project ? (
+                        <Status kind={on ? 'ok' : 'warn'}>{on ? 'Enabled' : 'Disabled'}</Status>
+                      ) : (
+                        <span className="muted">Choose a folder</span>
+                      )}
+                    </p>
+                  </div>
+                  <div className="card-actions">
+                    <button
+                      className={on ? undefined : 'primary'}
+                      disabled={busy !== null || !project}
+                      title={project ? undefined : 'Choose a project folder first'}
+                      onClick={() => toggle(row)}
+                    >
+                      {on ? 'Disable' : 'Enable'}
+                    </button>
+                  </div>
+                </article>
+              )
+            })}
+          </ListWrap>
+
+          {data?.servers.length === 0 && (
+            <p className="muted empty">No connections yet. Add one on the Connections tab.</p>
+          )}
+
+          {!project && data && data.servers.length > 0 && (
+            <p className="muted note">
+              Choose a project folder to set which of these load there. Connections stay authorized
+              either way &mdash; activation is per&#8209;folder, authorization is not.
+            </p>
+          )}
+
+          {project &&
+            data &&
+            data.servers.every((s) => !s.active) &&
+            !data.activation.connectorsSuppressed && (
+              <p className="muted note">
+                With none of ours active, Claude Code&rsquo;s own Webflow connector can load in this
+                project. It is a separate connection with its own authorization.
+              </p>
+            )}
+        </>
       )}
 
       {adding && (
@@ -402,12 +587,22 @@ export default function App() {
         />
       )}
 
+      {removing && (
+        <ConfirmRemove
+          server={removing.server}
+          label={removing.label}
+          busy={busy !== null}
+          onCancel={() => setRemoving(null)}
+          onConfirm={confirmRemove}
+        />
+      )}
+
       {login && (
         <LoginTerminal
           server={login.server}
           label={login.label}
           onExit={(code) => {
-            if (code === 0) void act('Verifying', () => wwm.verify(project, login.server))
+            if (code === 0) void verifyServer(login.server)
           }}
           onClose={() => setLogin(null)}
         />

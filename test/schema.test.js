@@ -216,6 +216,7 @@ test('switch', (t) => {
       'connector',
       'wroteFile',
       'fileConflict',
+      'source',
       'restartRequired',
       'error',
     ],
@@ -223,6 +224,7 @@ test('switch', (t) => {
   )
   assert.deepEqual(out.active, ['wf-example'])
   assert.deepEqual(out.disabled, ['wf-other'])
+  assert.equal(out.source, 'plugin state')
 })
 
 test('connect, which can never authorize without a TTY', (t) => {

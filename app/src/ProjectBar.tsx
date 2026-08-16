@@ -19,6 +19,8 @@ interface Props {
   onPick: () => void
   onSelect: (dir: string) => void
   onForget: (dir: string) => void
+  /** Shown when this folder's set is remembered in plugin state, not default. */
+  onReset?: () => void
 }
 
 export function ProjectBar({
@@ -31,6 +33,7 @@ export function ProjectBar({
   onPick,
   onSelect,
   onForget,
+  onReset,
 }: Props) {
   const [open, setOpen] = useState(false)
   const wrap = useRef<HTMLDivElement>(null)
@@ -49,15 +52,19 @@ export function ProjectBar({
     }
   }, [open])
 
-  const others = recents.filter((r) => r !== current)
+  const others = recents.filter((r) => r !== current).slice(0, 4)
+
+  useEffect(() => {
+    if (others.length === 0) setOpen(false)
+  }, [others.length])
 
   return (
     <div className={`projectbar${current ? '' : ' unset'}`} ref={wrap}>
       <div className="projectbar-main">
         {current ? (
-          <span className="projectbar-path mono" title={current}>
+          <h2 className="pane-heading projectbar-path" title={current}>
             {abbreviate(current, home)}
-          </span>
+          </h2>
         ) : (
           <span className="projectbar-path muted">
             none chosen — connections below are global, activation is per&#8209;folder
@@ -68,6 +75,16 @@ export function ProjectBar({
       {loading && <span className="spinner" aria-hidden="true" />}
 
       <div className="projectbar-actions">
+        {onReset && (
+          <button
+            className="ghost"
+            disabled={busy}
+            title="Forget this folder's remembered set. Every connection loads here, including ones added later."
+            onClick={onReset}
+          >
+            Reset to default
+          </button>
+        )}
         {others.length > 0 && (
           <button
             className="ghost"
@@ -100,7 +117,7 @@ export function ProjectBar({
         </button>
       </div>
 
-      {open && (
+      {open && others.length > 0 && (
         <ul className="menu">
           {others.map((dir) => (
             <li key={dir}>
