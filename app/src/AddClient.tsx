@@ -79,7 +79,7 @@ export function AddClient({ taken, busy, onCancel, onSubmit }: Props) {
             <button type="button" onClick={onCancel} disabled={busy}>
               Cancel
             </button>
-            <button type="submit" disabled={!ready}>
+            <button className="primary" type="submit" disabled={!ready}>
               {busy ? 'Adding…' : 'Add'}
             </button>
           </div>

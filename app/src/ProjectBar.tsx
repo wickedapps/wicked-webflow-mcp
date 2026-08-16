@@ -13,6 +13,9 @@ interface Props {
   recents: string[]
   home: string | null
   busy: boolean
+  loading: boolean
+  /** Per-folder activation, or null until a folder is chosen. */
+  summary: string | null
   onPick: () => void
   onSelect: (dir: string) => void
   onForget: (dir: string) => void
@@ -23,6 +26,8 @@ export function ProjectBar({
   recents,
   home,
   busy,
+  loading,
+  summary,
   onPick,
   onSelect,
   onForget,
@@ -48,26 +53,50 @@ export function ProjectBar({
 
   return (
     <div className={`projectbar${current ? '' : ' unset'}`} ref={wrap}>
-      <span className="projectbar-label">Project</span>
-
-      {current ? (
-        <span className="projectbar-path mono" title={current}>
-          {abbreviate(current, home)}
-        </span>
-      ) : (
-        <span className="projectbar-path muted">
-          none chosen — connections below are global, activation is per&#8209;folder
-        </span>
-      )}
+      <div className="projectbar-main">
+        {current ? (
+          <span className="projectbar-path mono" title={current}>
+            {abbreviate(current, home)}
+          </span>
+        ) : (
+          <span className="projectbar-path muted">
+            none chosen — connections below are global, activation is per&#8209;folder
+          </span>
+        )}
+        {summary && <p className="projectbar-meta muted">{summary}</p>}
+      </div>
+      {loading && <span className="spinner" aria-hidden="true" />}
 
       <div className="projectbar-actions">
         {others.length > 0 && (
-          <button className="ghost" onClick={() => setOpen((v) => !v)} disabled={busy}>
-            Recent ▾
+          <button
+            className="ghost"
+            aria-expanded={open}
+            aria-haspopup="listbox"
+            onClick={() => setOpen((v) => !v)}
+            disabled={busy}
+          >
+            Recent
+            <svg
+              className={`chevron${open ? ' open' : ''}`}
+              width="12"
+              height="12"
+              viewBox="0 0 12 12"
+              fill="none"
+              aria-hidden="true"
+            >
+              <path
+                d="M2.5 4.5 6 8l3.5-3.5"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
           </button>
         )}
         <button onClick={onPick} disabled={busy}>
-          {current ? 'Change…' : 'Choose folder…'}
+          {current ? 'Switch' : 'Choose folder…'}
         </button>
       </div>
 

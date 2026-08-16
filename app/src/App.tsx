@@ -76,6 +76,7 @@ export default function App() {
   const [login, setLogin] = useState<{ server: string; label: string } | null>(null)
   const [adding, setAdding] = useState(false)
   const [store, setStore] = useState<projects.Projects>(() => projects.load())
+  const [pending, setPending] = useState<string | null>(null)
 
   const project = store.current
 
@@ -132,6 +133,7 @@ export default function App() {
    * disable list somewhere else. The status call is the existence check.
    */
   const useProject = async (dir: string) => {
+    setPending(dir)
     setBusy('Loading')
     try {
       const next = await wwm.status(dir, false)
@@ -144,6 +146,7 @@ export default function App() {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
+      setPending(null)
       setBusy(null)
     }
   }
@@ -227,34 +230,65 @@ export default function App() {
       <header className="top">
         <div>
           <h1>Wicked Webflow MCP Manager</h1>
-          {data && (
+          {data ? (
             <p className="muted">
               {data.servers.length} connection{data.servers.length === 1 ? '' : 's'}
-              {project && (
-                <>
-                  {' '}
-                  &middot; {data.servers.filter((s) => s.active).length} active here (from{' '}
-                  {data.activation.source})
-                </>
-              )}
             </p>
+          ) : (
+            busy === 'Loading' && <p className="muted">Loading…</p>
           )}
         </div>
         <div className="actions">
-          <button onClick={() => setAdding(true)} disabled={busy !== null}>
-            Add client
+          <button className="primary" onClick={() => setAdding(true)} disabled={busy !== null}>
+            Add new
           </button>
-          <button onClick={() => void refresh(project, true)} disabled={busy !== null}>
-            {busy ?? 'Refresh'}
+          <button
+            className="icon-btn"
+            onClick={() => void refresh(project, true)}
+            disabled={busy !== null}
+            aria-label="Refresh"
+            title="Refresh"
+          >
+            <svg
+              className={busy === 'Loading' ? 'spin' : undefined}
+              width="16"
+              height="16"
+              viewBox="0 0 16 16"
+              fill="none"
+              aria-hidden="true"
+            >
+              <path
+                d="M13.5 8A5.5 5.5 0 1 1 11.4 3.4L14 6"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+              <path
+                d="M14 2.5V6h-3.5"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
           </button>
         </div>
       </header>
 
       <ProjectBar
-        current={project}
+        current={pending ?? project}
         recents={store.recents}
         home={located?.home ?? null}
         busy={busy !== null}
+        loading={pending !== null}
+        summary={
+          pending
+            ? 'Loading…'
+            : project && data
+              ? `${data.servers.filter((s) => s.active).length} active here (from ${data.activation.source})`
+              : null
+        }
         onPick={() => void pickProject()}
         onSelect={(dir) => void useProject(dir)}
         onForget={(dir) => setStore(projects.forget(dir))}
@@ -277,57 +311,70 @@ export default function App() {
         </p>
       )}
 
-      <table>
-        <thead>
-          <tr>
-            <th>Connection</th>
-            <th>Label</th>
-            <th>Health</th>
-            <th>Sites</th>
-            <th>Active here</th>
-            <th />
-          </tr>
-        </thead>
-        <tbody>
-          {data?.servers.map((row) => (
-            <tr key={row.server}>
-              <td className="mono">{row.server}</td>
-              <td>{row.label}</td>
-              <td className={row.health === 'connected' ? 'ok' : 'warn'}>
-                {HEALTH_LABEL[row.health]}
-              </td>
-              <td>
-                <Sites row={row} />
-              </td>
-              <td>
-                <input
-                  type="checkbox"
-                  checked={project ? row.active : false}
-                  disabled={busy !== null || !project}
-                  title={project ? undefined : 'Choose a project folder first'}
-                  onChange={() => toggle(row)}
-                />
-              </td>
-              <td className="row-actions">
-                <button
-                  disabled={busy !== null}
-                  onClick={() => void act('Verifying', () => wwm.verify(project, row.server))}
-                >
-                  Verify
-                </button>
-                {row.health === 'needs_auth' && (
-                  <button onClick={() => setLogin({ server: row.server, label: row.label })}>
-                    Authorize
-                  </button>
-                )}
-              </td>
+      <div className={`table-wrap${busy === 'Loading' ? ' loading' : ''}`} aria-busy={busy === 'Loading'}>
+        <table>
+          <thead>
+            <tr>
+              <th>Connection</th>
+              <th>Label</th>
+              <th>Health</th>
+              <th>Sites</th>
+              <th>Active here</th>
+              <th />
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {data?.servers.map((row) => (
+              <tr key={row.server}>
+                <td className="mono">{row.server}</td>
+                <td>{row.label}</td>
+                <td className={row.health === 'connected' ? 'ok' : 'warn'}>
+                  {HEALTH_LABEL[row.health]}
+                </td>
+                <td>
+                  <Sites row={row} />
+                </td>
+                <td>
+                  <input
+                    type="checkbox"
+                    checked={project ? row.active : false}
+                    disabled={busy !== null || !project}
+                    title={project ? undefined : 'Choose a project folder first'}
+                    onChange={() => toggle(row)}
+                  />
+                </td>
+                <td>
+                  <div className="row-actions">
+                    <button
+                      disabled={busy !== null}
+                      onClick={() => void act('Verifying', () => wwm.verify(project, row.server))}
+                    >
+                      Verify
+                    </button>
+                    {row.health === 'needs_auth' && (
+                      <button
+                        className="primary"
+                        onClick={() => setLogin({ server: row.server, label: row.label })}
+                      >
+                        Authorize
+                      </button>
+                    )}
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {busy === 'Loading' && (
+          <div className="table-loading">
+            <span className="spinner" aria-hidden="true" />
+            Loading…
+          </div>
+        )}
+      </div>
 
       {data?.servers.length === 0 && (
-        <p className="muted empty">No connections yet. &ldquo;Add client&rdquo; sets one up.</p>
+        <p className="muted empty">No connections yet. &ldquo;Add new&rdquo; sets one up.</p>
       )}
 
       {/* Health, sites and verify are global facts; only the checkboxes need a

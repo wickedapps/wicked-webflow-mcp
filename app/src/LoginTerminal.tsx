@@ -30,7 +30,7 @@ export function LoginTerminal({ server, label, onExit, onClose }: Props) {
     const term = new Terminal({
       fontSize: 12,
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-      theme: { background: '#0b0d10', foreground: '#d7dbe0', cursor: '#6ee7b7' },
+      theme: { background: '#181818', foreground: '#f1f2f4', cursor: '#2062d4' },
       convertEol: true,
     })
     const fit = new FitAddon()
