@@ -1,6 +1,6 @@
 [package]
 name = "wicked-webflow-app"
-version = "0.5.1"
+version = "0.6.0"
 description = "Desktop front end for the wwm CLI"
 authors = ["Wicked Apps"]
 license = "ISC"

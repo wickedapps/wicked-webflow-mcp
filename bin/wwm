@@ -25,7 +25,7 @@ export const PLUGIN_ID = 'wicked-webflow-mcp'
 // npm ships only this file, so the version cannot be read from package.json.
 // Bump in lockstep with package.json, plugin.json, and marketplace.json.
 // `node scripts/release.mjs stamp <version>` does all of them at once.
-export const VERSION = '0.5.1'
+export const VERSION = '0.6.0'
 
 /**
  * The shape of `--json` output, versioned independently of VERSION.
