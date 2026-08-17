@@ -1,11 +1,3 @@
-// Which directory the app is managing.
-//
-// Everything per-project in the CLI — `status`'s activation block, what
-// `switch` writes into ~/.claude.json — is keyed on a working directory. In a
-// terminal that is wherever you happen to have cd'd. A GUI has no equivalent,
-// and an app launched from Finder starts at `/`, so the directory has to be an
-// explicit, visible, persistent choice.
-
 import { open } from '@tauri-apps/plugin-dialog'
 
 const KEY = 'wwm.projects.v1'
@@ -61,10 +53,7 @@ export function select(dir: string): Projects {
   })
 }
 
-/**
- * Drop `dir` from the history — for a folder that has been moved or deleted,
- * which is the one thing a persisted list of paths guarantees will happen.
- */
+/** Drop `dir` from the history (moved or deleted folders). */
 export function forget(dir: string): Projects {
   const { current, recents } = load()
   return save({

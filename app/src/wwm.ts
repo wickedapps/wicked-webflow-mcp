@@ -1,12 +1,5 @@
-// Typed client for the CLI.
-//
-// These shapes are a declared contract, not a guess: bin/wwm stamps every
-// --json payload with SCHEMA_VERSION, and test/schema.test.js pins the exact
-// key set of each one. If a field here stops matching the CLI, that suite
-// fails before a release does.
-//
-// When bumping EXPECTED_SCHEMA_VERSION, update the interfaces below in the
-// same commit — they are the other half of the same contract.
+// Typed client for the CLI. When bumping EXPECTED_SCHEMA_VERSION, update the
+// interfaces below in the same commit — they are the other half of the contract.
 
 import { invoke } from '@tauri-apps/api/core'
 
@@ -61,7 +54,7 @@ export interface ConnectResult extends Envelope {
   server: string
   label: string
   scope: string
-  /** Present when the CLI could not authorize itself. Always, from here: a GUI has no TTY either. */
+  /** Always present from this app: `connect` is called with `--print-command`. */
   loginCommand?: string
   authorized?: boolean
   verified?: unknown
@@ -204,12 +197,11 @@ export const status = (project: Project, refresh = false) =>
   run<StatusResult>(refresh ? ['status', '--refresh'] : ['status'], project)
 
 /**
- * Add the server. Never authorizes — with no TTY the CLI returns the login
- * command instead, which is exactly what LoginTerminal then runs on a pty.
+ * Add the server. Never authorizes — `--print-command` makes the CLI return
+ * the login command, which LoginTerminal then runs on a pty.
  *
- * Registration is user-scope, so this does not depend on the project; it is
- * still run there so that the verify `connect` performs, and any path the CLI
- * prints, are about the directory on screen.
+ * Registration is user-scope; the project is still passed so any paths the
+ * CLI prints match the directory on screen.
  */
 export const connect = (project: Project, slug: string, label?: string) =>
   run<ConnectResult>(
@@ -242,12 +234,9 @@ export const verify = (project: Project, server?: string) =>
 export const remove = (project: Project, server: string) =>
   run<{ ok: boolean }>(['remove', server, '--yes'], project)
 
-// --- slug preview -----------------------------------------------------------
-//
-// A mirror of slugify()/validateSlug() in bin/wwm:333-352, so the Add-client
-// form can show what a typed name becomes before it is submitted. The CLI is
-// still the authority — it revalidates and exits 2 on anything bad — so a
-// drift here costs a wrong preview, never a wrong connection.
+// Mirror of slugify()/validateSlug() in bin/wwm, for the Add-client preview.
+// The CLI revalidates and exits 2 on anything bad, so drift here costs a
+// wrong preview, never a wrong connection.
 
 export const slugify = (input: string): string =>
   input

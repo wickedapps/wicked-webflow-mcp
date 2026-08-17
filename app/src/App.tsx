@@ -80,12 +80,7 @@ function Status({
   )
 }
 
-/**
- * Sites the last verify found — or an honest absence.
- *
- * `sites: null` means never verified, which is not the same as verified and
- * fine. The CLI and the skills are both careful about this; so is the UI.
- */
+/** `sites: null` is never verified — not the same as verified and empty. */
 function Sites({ row }: { row: wwm.ServerRow }) {
   if (row.sites === null) return <span className="muted">Unverified</span>
   if (row.sites.length === 0) return <span className="warn">No sites</span>
@@ -141,7 +136,7 @@ function applyActive(data: wwm.StatusResult, active: string[]): wwm.StatusResult
   }
 }
 
-/** Fold a `switch --json` payload into the table so a toggle does not wait on `mcp list`. */
+/** Fold a `switch --json` payload into the list so a toggle does not wait on `mcp list`. */
 function applySwitch(data: wwm.StatusResult, res: wwm.SwitchResult): wwm.StatusResult {
   const next = applyActive(data, res.active)
   return {
@@ -280,7 +275,7 @@ export default function App() {
     const previous = data
     // switch replaces the whole active set; it is not a per-server flag.
     // Flip now — switch itself is a JSON write, and waiting on a status
-    // reread would make the checkbox look like it ignored the click.
+    // reread would make the button look like it ignored the click.
     setData(applyActive(data, next))
     setBusy('Switching')
     void (async () => {

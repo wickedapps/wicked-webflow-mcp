@@ -1,6 +1,5 @@
-// Remove destroys the OAuth grant at every scope. The confirm sheet exists so
-// that is not the same click as Verify, and so it cannot be confused with the
-// per-project off switch on the Projects tab.
+// Remove destroys the OAuth grant everywhere. Confirm so that cannot be
+// confused with disabling a connection in one project.
 
 interface Props {
   server: string
@@ -20,7 +19,7 @@ export function ConfirmRemove({ server, label, busy, onCancel, onConfirm }: Prop
             <p className="muted">
               This destroys the authorization for <code>{server}</code> everywhere, not just in one
               folder. Restoring it means walking through Webflow&rsquo;s consent screen again. To
-              unload a connection in a project, switch to the Projects tab and untick it there.
+              unload a connection in a project, switch to the Projects tab and disable it there.
             </p>
           </div>
         </header>

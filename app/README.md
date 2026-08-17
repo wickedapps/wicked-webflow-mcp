@@ -4,7 +4,7 @@ A GUI over the `wwm` CLI. It does not reimplement any of it.
 
 ## Why it exists
 
-`claude mcp login` checks for a controlling terminal before it starts the browser flow. An agent shell and the Bash tool have neither, so `wwm connect --json` can only hand back a command string for the user to paste into their own terminal ([`bin/wwm:1726`](../bin/wwm)). Pipes do not satisfy the check — a pty does, and a desktop process is the only one of the three surfaces that can open one.
+`claude mcp login` checks for a controlling terminal before it starts the browser flow. An agent shell and the Bash tool have neither, so `wwm connect --json` can only hand back a command string for the user to paste into their own terminal ([`bin/wwm`](../bin/wwm), `--print-command`). Pipes do not satisfy the check — a pty does, and a desktop process is the only one of the three surfaces that can open one.
 
 That is the app's job. Everything else here — the status table, the active toggles, verify — is a convenience over `wwm <cmd> --json` and duplicates what the interactive `wwm` dashboard already does in a terminal.
 
@@ -27,11 +27,11 @@ No state is duplicated. `state.json` and `.claude.json` have exactly one writer 
 
 `status`'s activation block and everything `switch` writes are keyed on a working directory — `~/.claude.json`'s `projects[<resolved cwd>].disabledMcpServers`. In a terminal that is wherever you have `cd`'d. A GUI has no equivalent, and one launched from Finder starts at `/`, so the directory is an explicit choice: a picker in the header, persisted in `localStorage` with a recents list.
 
-Commands run *in* that directory rather than being passed a flag. `--project` exists only on `switch` and `activate`, so a flag would be silently ignored by `status` and the table would describe a different directory than the toggles wrote to.
+Commands run *in* that directory rather than being passed a flag. `--project` exists only on `switch` and `activate`, so a flag would be silently ignored by `status` and the list would describe a different directory than the toggles wrote to.
 
 Two consequences worth knowing:
 
-- **Until a folder is chosen, the "Active here" toggles are inert.** Health, sites and verify are global facts and still work. Defaulting to `$HOME` instead would mean a first click quietly writing a disable list for the home directory.
+- **Until a folder is chosen, Enable/Disable on the Projects tab is inert.** Health, sites and verify are global facts and still work. Defaulting to `$HOME` instead would mean a first click quietly writing a disable list for the home directory.
 - **The picked path is not always the stored one.** The CLI resolves symlinks, so `/tmp/x` is keyed as `/private/tmp/x`. The app adopts whatever `status` reports as `cwd`, so what is displayed is what gets written.
 
 ### The PATH problem

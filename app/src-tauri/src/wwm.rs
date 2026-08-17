@@ -1,10 +1,6 @@
-//! The bridge to the CLI.
-//!
-//! Every command in `bin/wwm` supports `--json`: machine-readable output on
-//! stdout, human prose on stderr. That is already a backend contract, so this
-//! app shells out rather than reimplementing anything. Porting state.json and
-//! .claude.json handling to Rust would mean two unsynchronised writers to the
-//! same files — and .claude.json's schema belongs to Claude Code, not us.
+//! Shell out to `bin/wwm --json`. Do not reimplement state.json / .claude.json
+//! handling here — two writers to those files would drift, and .claude.json's
+//! schema belongs to Claude Code.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -97,10 +93,9 @@ fn working_dir(cwd: Option<String>) -> Result<PathBuf, String> {
 
 /// `WWM_BIN` -> bundled sidecar -> PATH.
 ///
-/// The sidecar rung is deliberately unpopulated for now: `wwm` already
-/// requires the `claude` CLI at runtime, so anyone who can use this app has a
-/// developer environment. Bundling node only matters if this ever ships to
-/// people who do not.
+/// The sidecar path is unused today: `wwm` already needs the `claude` CLI, so
+/// anyone using this app has a developer environment. Bundling node only
+/// matters if this ever ships to people who do not.
 pub fn locate(app: &AppHandle) -> Result<Located, String> {
     if let Ok(raw) = std::env::var("WWM_BIN") {
         let path = PathBuf::from(&raw);
@@ -146,13 +141,12 @@ pub struct Output {
 ///
 /// Running the CLI *in* the project directory rather than passing it a flag is
 /// deliberate: `--project` exists only on `switch` and `activate`, so a flag
-/// would be silently ignored by `status` and the table would describe a
+/// would be silently ignored by `status` and the list would describe a
 /// different directory than the toggles wrote to.
 ///
 /// This is the blocking half. The Tauri commands wrap it in `spawn_blocking`:
 /// a sync `#[tauri::command]` runs on the UI thread, and `Command::output()`
-/// waiting on `claude mcp list` is how a checkbox click used to freeze the
-/// window with the wait cursor until the child exited.
+/// waiting on `claude mcp list` would freeze the window until the child exited.
 fn run_wwm(app: &AppHandle, args: Vec<String>, cwd: Option<String>) -> Result<Output, String> {
     let bin = locate(app)?;
     let dir = working_dir(cwd)?;

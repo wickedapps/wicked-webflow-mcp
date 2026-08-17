@@ -1,9 +1,3 @@
-// Which folder the app is managing, and how to change it.
-//
-// It sits above the table rather than in a settings pane because it changes
-// the meaning of a column: "Active here" is a fact about a directory, and a
-// directory the user cannot see is one they will get wrong.
-
 import { useEffect, useRef, useState } from 'react'
 
 import { abbreviate, basename } from './project'

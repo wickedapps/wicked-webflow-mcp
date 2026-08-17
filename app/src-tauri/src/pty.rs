@@ -1,10 +1,5 @@
-//! `claude mcp login` under a real terminal.
-//!
-//! This is the app's reason to exist. From an agent shell or the Bash tool
-//! there is no TTY, so `wwm connect --json` can only hand back a command
-//! string for the user to paste elsewhere (bin/wwm:1726). Pipes do not help —
-//! the check is for a controlling terminal. A pty is the only fix, and a
-//! desktop process is the only one of the three surfaces that can open one.
+//! `claude mcp login` under a real pty. Pipes fail the controlling-terminal
+//! check; a desktop process is the only surface here that can open one.
 
 use std::io::{Read, Write};
 use std::sync::Mutex;

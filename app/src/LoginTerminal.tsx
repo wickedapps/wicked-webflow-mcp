@@ -1,10 +1,3 @@
-// The pty view.
-//
-// `claude mcp login` checks for a controlling terminal before it opens the
-// browser flow, so the CLI cannot run it from an agent shell and neither could
-// this app over pipes. Rust opens a real pty (src-tauri/src/pty.rs) and this
-// is the other end of it.
-
 import { FitAddon } from '@xterm/addon-fit'
 import { Terminal } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'

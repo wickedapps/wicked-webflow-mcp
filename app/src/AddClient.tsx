@@ -1,11 +1,3 @@
-// The Add-client form.
-//
-// This was a window.prompt(), which the webview does not implement — the
-// button did nothing at all. It also could not have shown the one thing worth
-// showing: what the typed name turns into. Slugification is silent, and the
-// result becomes a tool-name prefix in every session, so it is worth seeing
-// before it is committed to.
-
 import { useState } from 'react'
 
 import { slugify, validateSlug } from './wwm'
