@@ -1,9 +1,11 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Wicked Webflow MCP Manager",
+  "mainBinaryName": "Wicked Webflow MCP Manager",
   "version": "0.5.1",
   "identifier": "com.wickedapps.wicked-webflow",
   "build": {
+    "runner": "./dev-runner.sh",
     "beforeDevCommand": "npm run dev:vite",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "npm run build:vite",
@@ -27,9 +29,14 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["app", "dmg"],
     "category": "DeveloperTool",
-    "shortDescription": "Per-client Webflow MCP connections for Claude Code",
-    "icon": ["icons/icon.png"]
+    "shortDescription": "Manage multiple Webflow MCP connections for Claude Code",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns"
+    ]
   }
 }

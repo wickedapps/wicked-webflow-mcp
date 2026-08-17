@@ -58,7 +58,9 @@ npm run check    # tsc --noEmit
 npm run icons    # regenerate the icon set from src-tauri/icons/icon.png
 ```
 
-The checked-in `icon.png` is a placeholder. Replace it and run `npm run icons`, then extend `bundle.icon` in `tauri.conf.json` with the generated `.icns`/`.ico` before shipping a real release.
+`npm run app:build` from the repo root is the same bundle, without the `cd`.
+
+`icon.png` is the 1024×1024 source every other size is derived from. It is not artwork on its own — it carries the macOS icon geometry: an 820×820 rounded tile centred in a transparent canvas, matching the stock system icons. `tauri icon` only resizes, so a replacement that bleeds to all four edges ships an icon that renders visibly larger than everything beside it in the Dock.
 
 ## The `--json` contract
 
