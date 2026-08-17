@@ -10,7 +10,9 @@
     "build:vite": "tsc --noEmit && vite build",
     "check": "tsc --noEmit",
     "icons": "tauri icon src-tauri/icons/icon.png",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "version:check": "npm --prefix .. run version:check",
+    "release": "npm --prefix .. run release --"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.1.1",

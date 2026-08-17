@@ -181,6 +181,8 @@ npm run release -- 0.6.0    # stamp everywhere
 npm run version:check       # what CI runs
 ```
 
+Both live in the root `package.json`. Run them from the repo root — inside `app/`, npm resolves `app/package.json` instead, which owns the desktop app's own scripts. It forwards these two up so either directory works.
+
 ---
 
 ## License
