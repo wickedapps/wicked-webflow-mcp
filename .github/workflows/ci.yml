@@ -35,3 +35,8 @@ jobs:
       # --strict fails on warnings, including missing metadata.
       - run: claude plugin validate . --strict
       - run: claude plugin validate .claude-plugin/plugin.json --strict
+      # npm, plugin.json, marketplace.json, bin/wwm's hardcoded VERSION and the
+      # Tauri crate all carry the version independently. Nothing else notices
+      # when they drift, so this is the only thing standing between a typo and
+      # a plugin that reports a version it isn't.
+      - run: npm run version:check

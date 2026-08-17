@@ -24,7 +24,23 @@ export const DEFAULT_PREFIX = 'wf-'
 export const PLUGIN_ID = 'wicked-webflow-mcp'
 // npm ships only this file, so the version cannot be read from package.json.
 // Bump in lockstep with package.json, plugin.json, and marketplace.json.
-export const VERSION = '0.5.1'
+// `node scripts/release.mjs stamp <version>` does all of them at once.
+export const VERSION = '0.6.0'
+
+/**
+ * The shape of `--json` output, versioned independently of VERSION.
+ *
+ * Every payload carries this as its first key. Consumers that are not this
+ * repo — the desktop app, anyone scripting against `wwm` — read it and refuse
+ * to guess when it is a number they do not know.
+ *
+ * Bump ONLY on a breaking change: a field removed, renamed, retyped, or given
+ * a new meaning. Adding a field is not breaking; consumers must ignore keys
+ * they do not recognise. The exact key set of every payload is pinned in
+ * test/schema.test.js, so any change to output fails there first and this
+ * decision gets made deliberately rather than noticed in production.
+ */
+export const SCHEMA_VERSION = 1
 
 export const EXIT = {
   OK: 0,
@@ -795,8 +811,12 @@ function human(msg = '') {
   process.stderr.write(msg + '\n')
 }
 
+/**
+ * The only writer to stdout. schemaVersion is stamped here rather than at the
+ * dozen call sites, so a new command cannot forget it.
+ */
 function emitJson(obj) {
-  process.stdout.write(JSON.stringify(obj, null, 2) + '\n')
+  process.stdout.write(JSON.stringify({ schemaVersion: SCHEMA_VERSION, ...obj }, null, 2) + '\n')
 }
 
 const sym = { ok: '✔', warn: '⚠', bad: '✘', dot: '●', ring: '○' }
@@ -2265,9 +2285,12 @@ function applyActivation(dir, active, owned, { suppress = 'skip' } = {}) {
   return { disabled, write, connector }
 }
 
-const SWITCH_USAGE = `Usage: wwm switch <slug>... | --all | --none  [--write] [--project <path>]
+const SWITCH_USAGE = `Usage: wwm switch <slug>... | --all | --none | --default  [--write] [--project <path>]
 
-  --write   also record the set in ${WICKED_FILE} so it travels with the repo`
+  --all       every current connection, remembered as this project's set
+  --none      no Webflow connections here
+  --default   forget this project's set so every connection loads, including ones added later
+  --write     also record the set in ${WICKED_FILE} so it travels with the repo`
 
 function cmdSwitch(args) {
   // Deliberately no preflight: switch runs no subprocess and touches no
@@ -2279,10 +2302,22 @@ function cmdSwitch(args) {
 
   if (owned.length === 0) throw new Fail(EXIT.USAGE, 'No wwm-managed connections yet.', 'Run `wwm connect <client>` first.')
 
+  const modes = [args.flags.none, args.flags.all, args.flags.default, args.positional.length > 0].filter(Boolean).length
+  if (modes > 1) {
+    throw new Fail(EXIT.USAGE, 'Pick one of names, --all, --none, or --default.', SWITCH_USAGE)
+  }
+  if (args.flags.default && args.flags.write) {
+    throw new Fail(
+      EXIT.USAGE,
+      '--default cannot be combined with --write.',
+      '`--write` records a set in the repo; `--default` forgets the set so nothing is recorded.'
+    )
+  }
+
   let active
   let interactive = false
   if (args.flags.none) active = []
-  else if (args.flags.all) active = [...owned]
+  else if (args.flags.all || args.flags.default) active = [...owned]
   else if (args.positional.length > 0) {
     const wanted = args.positional.map((s) => toServerName(s, prefix()))
     const unknown = wanted.filter((n) => !owned.includes(n))
@@ -2317,15 +2352,22 @@ function cmdSwitch(args) {
   const result = applyActivation(dir, active, owned, { suppress })
 
   state.projects = state.projects ?? {}
-  state.projects[dir] = {
-    ...(state.projects[dir] ?? {}),
-    active,
-    at: new Date().toISOString(),
-    suppressedConnectors: result.connector.state === 'suppressed'
-      ? true
-      : result.connector.state === 'restored'
-        ? false
-        : (state.projects[dir]?.suppressedConnectors ?? false),
+  const prev = state.projects[dir] ?? {}
+  const suppressedConnectors = result.connector.state === 'suppressed'
+    ? true
+    : result.connector.state === 'restored'
+      ? false
+      : (prev.suppressedConnectors ?? false)
+
+  if (args.flags.default) {
+    // Forgetting `active` is the whole difference from `--all`. `--all` writes
+    // the current owned names, so a connection added later stays off here.
+    // With no remembered set, resolveActiveSet falls through to everything.
+    const next = { ...prev, at: new Date().toISOString(), suppressedConnectors }
+    delete next.active
+    state.projects[dir] = next
+  } else {
+    state.projects[dir] = { ...prev, active, at: new Date().toISOString(), suppressedConnectors }
   }
   saveState(state)
 
@@ -2345,6 +2387,9 @@ function cmdSwitch(args) {
   const file = readWickedFile(dir)
   const fileConflict = file && !write &&
     !sameList([...new Set(file.entries.map((e) => toServerName(e, prefix())))].filter((n) => owned.includes(n)), active)
+  // Same precedence status uses: a committed file still wins at session start,
+  // even after `--default` forgets plugin state.
+  const source = file ? WICKED_FILE : args.flags.default ? 'default (all)' : 'plugin state'
 
   if (ctx.json) {
     emitJson({
@@ -2355,6 +2400,7 @@ function cmdSwitch(args) {
       connector: result.connector.state,
       wroteFile,
       fileConflict: Boolean(fileConflict),
+      source,
       restartRequired: true,
       error: result.write.ok ? null : result.write.reason,
     })
@@ -2363,7 +2409,9 @@ function cmdSwitch(args) {
 
   if (!result.write.ok) throw new Fail(EXIT.GENERIC, 'Could not apply the activation set.', result.write.reason)
 
-  human(`${sym.ok} ${active.length === 0 ? 'No Webflow connections' : active.join(', ')} active in ${dir}`)
+  human(args.flags.default
+    ? `${sym.ok} Default (all connections) in ${dir}`
+    : `${sym.ok} ${active.length === 0 ? 'No Webflow connections' : active.join(', ')} active in ${dir}`)
   if (result.disabled.length) human(`  disabled here: ${result.disabled.join(', ')}`)
   if (wroteFile) human(`  wrote ${WICKED_FILE} — commit it and teammates get the same set`)
   reportConnector(result.connector, active, { asked })
@@ -2636,7 +2684,7 @@ const USAGE = `wwm — per-client Webflow MCP connections for Claude Code
   wwm verify [<slug>]      headless scope check (picker in a terminal, else --all)
   wwm status               health + scope + activation state
   wwm switch [<slug>...]   set the connections active in this project
-                           (--all | --none | --write to commit the set)
+                           (--all | --none | --default | --write to commit the set)
   wwm activate --for-cwd   apply this project's set (the SessionStart hook)
   wwm remove <slug>        logout + remove (destroys the grant)
   wwm doctor               preflight checks

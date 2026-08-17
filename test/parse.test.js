@@ -546,6 +546,47 @@ test('switch rejects a name it does not manage instead of writing a useless key'
   assert.throws(() => box.run(['switch', 'nope', '--project', box.base]), (err) => err.status === 2)
 })
 
+test('switch --default forgets plugin state so later connections load too', (t) => {
+  // `--all` writes the current owned names. A connection added after that stays
+  // off in the project, which is the opposite of "go back to default". Default
+  // means deleting the remembered set, not snapshotting everything that exists
+  // right now.
+  const project = mkdtempSync(join(tmpdir(), 'wwm-proj-'))
+  t.after(() => rmSync(project, { recursive: true, force: true }))
+  const key = realpathSync(project)
+  const box = sandbox(t)
+
+  box.run(['switch', 'a', '--project', project])
+  assert.deepEqual(JSON.parse(readFileSync(join(box.data, 'state.json'), 'utf8')).projects[key].active, ['wf-a'])
+  assert.equal(box.run(['activate', '--for-cwd', '--project', project]).source, 'plugin state')
+
+  const out = box.run(['switch', '--default', '--project', project])
+  assert.deepEqual(out.active, ['wf-a', 'wf-b'])
+  assert.equal(out.source, 'default (all)')
+  assert.equal(JSON.parse(readFileSync(join(box.data, 'state.json'), 'utf8')).projects[key].active, undefined)
+  assert.deepEqual(box.config().projects[key].disabledMcpServers, [])
+  assert.equal(box.run(['activate', '--for-cwd', '--project', project]).source, 'default (all)')
+})
+
+test('switch --all still remembers the set — that is not default', (t) => {
+  const project = mkdtempSync(join(tmpdir(), 'wwm-proj-'))
+  t.after(() => rmSync(project, { recursive: true, force: true }))
+  const key = realpathSync(project)
+  const box = sandbox(t)
+
+  const out = box.run(['switch', '--all', '--project', project])
+  assert.deepEqual(out.active, ['wf-a', 'wf-b'])
+  assert.equal(out.source, 'plugin state')
+  assert.deepEqual(JSON.parse(readFileSync(join(box.data, 'state.json'), 'utf8')).projects[key].active, ['wf-a', 'wf-b'])
+})
+
+test('switch --default cannot be combined with a set', (t) => {
+  const box = sandbox(t)
+  assert.throws(() => box.run(['switch', '--default', '--all', '--project', box.base]), (err) => err.status === 2)
+  assert.throws(() => box.run(['switch', '--default', '--write', '--project', box.base]), (err) => err.status === 2)
+  assert.throws(() => box.run(['switch', 'a', '--default', '--project', box.base]), (err) => err.status === 2)
+})
+
 test('activate reads .wicked-webflow, and it outranks plugin state', (t) => {
   const project = mkdtempSync(join(tmpdir(), 'wwm-proj-'))
   t.after(() => rmSync(project, { recursive: true, force: true }))

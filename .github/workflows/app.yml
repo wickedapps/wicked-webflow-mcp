@@ -1,0 +1,62 @@
+name: App
+
+# The desktop app is the only part of the repo that needs a Rust toolchain and
+# platform GUI libraries, and it is the part least likely to change. Gating on
+# paths keeps a CLI-only PR off a three-platform matrix.
+on:
+  push:
+    branches: [main]
+    paths: ['app/**', '.github/workflows/app.yml']
+  pull_request:
+    paths: ['app/**', '.github/workflows/app.yml']
+
+defaults:
+  run:
+    working-directory: app
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+          - os: ubuntu-22.04
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Node 22 still ships npm 10. min-release-age (app/.npmrc) landed in
+      # npm 11.10; without this bump the setting is a silent no-op and a
+      # freshly published malicious version would install in CI.
+      - run: npm install -g npm@^11.10.0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+
+      - name: Tauri system dependencies
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev \
+            librsvg2-dev patchelf build-essential curl wget file libssl-dev \
+            libxdo-dev libayatana-appindicator3-dev
+
+      - run: npm install
+
+      - run: npm run check
+
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - run: npm run build

@@ -8,6 +8,12 @@ node_modules/
 npm-debug.log*
 *.tsbuildinfo
 
+# Rust / Tauri (app/.gitignore repeats these; this catches a build run from
+# anywhere else, and a stray target/ is gigabytes)
+target/
+app/dist/
+app/src-tauri/gen/
+
 # Runtime artifacts
 state.json
 mcp-list-cache.json

@@ -115,7 +115,8 @@ So keep every client authorized, and load only the ones a project needs:
 ```bash
 wwm switch dino           # only Dino Studios loads in this directory
 wwm switch dino --write   # …and commit that choice as .wicked-webflow
-wwm switch --all          # everything, here
+wwm switch --all          # everything currently connected, remembered as this project's set
+wwm switch --default      # forget the remembered set — every connection loads, including ones added later
 wwm switch --none         # no Webflow connections here
 ```
 
@@ -152,6 +153,35 @@ This is the part worth reading slowly, because the pitch and the mechanism are n
 **This plugin never sees your credentials.** Every connection change is made by shelling out to the `claude` CLI. Tokens live in Claude Code's keychain storage; `wwm` reads connection names and health, and nothing else.
 
 **`remove` destroys the grant.** On Claude Code 2.1.223, removing a server invalidates its stored authorization everywhere, at any scope. There is no way to remove a connection and keep its token, which is why deactivating for one project is `wwm switch` and never `remove`.
+
+---
+
+## Repo layout
+
+Three artifacts ship from here, and they share one implementation.
+
+```
+bin/wwm                 the CLI — a single file, zero runtime deps
+.claude-plugin/         plugin + marketplace manifests
+skills/  hooks/         the Claude Code plugin's surface
+app/                    Wicked Webflow MCP Manager (see app/README.md)
+scripts/release.mjs     stamps one version across all six declarations
+```
+
+The repo root **is** the plugin root. `marketplace.json` says `"source": "./"`, `hooks.json` runs `${CLAUDE_PLUGIN_ROOT}/bin/wwm`, and CI validates `.` — so `bin/wwm` has to sit at the root to be reachable by both npm and the plugin. That is why this is not a `packages/*` monorepo.
+
+The desktop app does not reimplement the CLI. Every `wwm` command already speaks `--json` on stdout with human prose on stderr, so the app shells out to it. `state.json` and `.claude.json` keep exactly one writer.
+
+Because that output now has a consumer that ships on its own cadence, it is a versioned contract: `SCHEMA_VERSION` in `bin/wwm` is stamped onto every payload, and `test/schema.test.js` pins the exact key set of each command end to end. Any change to a `--json` field fails there before it reaches anyone.
+
+Versions are declared independently in `package.json`, `bin/wwm`, `plugin.json`, `marketplace.json`, `Cargo.toml` and `tauri.conf.json`. Never edit them by hand:
+
+```
+npm run release -- 0.6.0    # stamp everywhere
+npm run version:check       # what CI runs
+```
+
+Both live in the root `package.json`. Run them from the repo root — inside `app/`, npm resolves `app/package.json` instead, which owns the desktop app's own scripts. It forwards these two up so either directory works.
 
 ---
 
