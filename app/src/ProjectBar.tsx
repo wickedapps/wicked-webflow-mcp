@@ -10,6 +10,8 @@ interface Props {
   loading: boolean
   /** Per-folder activation, or null until a folder is chosen. */
   summary: string | null
+  /** Connections waiting to be enabled once a folder is chosen. */
+  ready: number
   onPick: () => void
   onSelect: (dir: string) => void
   onForget: (dir: string) => void
@@ -24,6 +26,7 @@ export function ProjectBar({
   busy,
   loading,
   summary,
+  ready,
   onPick,
   onSelect,
   onForget,
@@ -60,11 +63,17 @@ export function ProjectBar({
             {abbreviate(current, home)}
           </h2>
         ) : (
-          <span className="projectbar-path muted">
-            none chosen — connections below are global, activation is per&#8209;folder
-          </span>
+          <h2 className="pane-heading">No folder selected</h2>
         )}
-        {summary && <p className="projectbar-meta muted">{summary}</p>}
+        {current ? (
+          summary && <p className="projectbar-meta muted">{summary}</p>
+        ) : (
+          <p className="projectbar-hint muted">
+            {ready === 1
+              ? '1 connection is ready. Pick a folder to enable it there.'
+              : `${ready} connections are ready. Pick a folder to choose which load there.`}
+          </p>
+        )}
       </div>
       {loading && <span className="spinner" aria-hidden="true" />}
 
@@ -106,7 +115,7 @@ export function ProjectBar({
             </svg>
           </button>
         )}
-        <button onClick={onPick} disabled={busy}>
+        <button className={current ? undefined : 'primary'} onClick={onPick} disabled={busy}>
           {current ? 'Switch' : 'Choose folder…'}
         </button>
       </div>

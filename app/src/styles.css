@@ -371,6 +371,15 @@ button.icon-btn {
   margin-bottom: 12px;
 }
 
+.projectbar.unset {
+  align-items: flex-start;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--control-radius);
+  padding: 12px 14px;
+  margin-bottom: 14px;
+}
+
 .projectbar-main {
   flex: 1;
   min-width: 0;
@@ -382,6 +391,12 @@ button.icon-btn {
 .projectbar-meta {
   margin: 0;
   font-size: 12px;
+}
+
+.projectbar-hint {
+  margin: 2px 0 0;
+  font-size: 13px;
+  max-width: 48ch;
 }
 
 .projectbar-path {
@@ -397,6 +412,10 @@ button.icon-btn {
   display: flex;
   gap: 8px;
   flex-shrink: 0;
+}
+
+.projectbar.unset .projectbar-actions {
+  padding-top: 1px;
 }
 
 button.ghost {

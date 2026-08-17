@@ -508,20 +508,23 @@ export default function App() {
 
       {tab === 'projects' && (
         <>
-          <ProjectBar
-            current={pending ?? project}
-            recents={store.recents}
-            home={located?.home ?? null}
-            busy={busy !== null}
-            loading={pending !== null}
-            summary={projectSummary(pending, project, data)}
-            onPick={() => void pickProject()}
-            onSelect={(dir) => void useProject(dir)}
-            onForget={(dir) => setStore(projects.forget(dir))}
-            {...(project && !pending && data?.activation.source === 'plugin state'
-              ? { onReset: resetToDefault }
-              : {})}
-          />
+          {((pending ?? project) || (data && data.servers.length > 0)) && (
+            <ProjectBar
+              current={pending ?? project}
+              recents={store.recents}
+              home={located?.home ?? null}
+              busy={busy !== null}
+              loading={pending !== null}
+              summary={projectSummary(pending, project, data)}
+              ready={data?.servers.length ?? 0}
+              onPick={() => void pickProject()}
+              onSelect={(dir) => void useProject(dir)}
+              onForget={(dir) => setStore(projects.forget(dir))}
+              {...(project && !pending && data?.activation.source === 'plugin state'
+                ? { onReset: resetToDefault }
+                : {})}
+            />
+          )}
 
           {project && data?.activation.fileConflict && (
             <p className="warn-banner">
@@ -531,45 +534,36 @@ export default function App() {
             </p>
           )}
 
-          <ListWrap status={busy === 'Loading' ? 'Loading…' : null}>
-            {data?.servers.map((row) => {
-              const on = Boolean(project && row.active)
-              return (
-                <article key={row.server} className="card">
-                  <div className="card-body">
-                    <h3 className="card-title">{row.label}</h3>
-                    <p className="card-id mono muted">{row.server}</p>
-                    <p className="card-meta">
-                      {project ? (
-                        <Status kind={on ? 'ok' : 'warn'}>{on ? 'Enabled' : 'Disabled'}</Status>
-                      ) : (
-                        <span className="muted">Choose a folder</span>
-                      )}
-                    </p>
-                  </div>
-                  <div className="card-actions">
-                    <button
-                      className={on ? undefined : 'primary'}
-                      disabled={busy !== null || !project}
-                      title={project ? undefined : 'Choose a project folder first'}
-                      onClick={() => toggle(row)}
-                    >
-                      {on ? 'Disable' : 'Enable'}
-                    </button>
-                  </div>
-                </article>
-              )
-            })}
-            {data?.servers.length === 0 && (
-              <EmptyState>Add one on the Connections tab.</EmptyState>
-            )}
-          </ListWrap>
-
-          {!project && data && data.servers.length > 0 && (
-            <p className="muted note">
-              Choose a project folder to set which of these load there. Connections stay authorized
-              either way &mdash; activation is per&#8209;folder, authorization is not.
-            </p>
+          {((pending ?? project) || !data || data.servers.length === 0) && (
+            <ListWrap status={busy === 'Loading' ? 'Loading…' : null}>
+              {(pending ?? project) &&
+                data?.servers.map((row) => {
+                  const on = row.active
+                  return (
+                    <article key={row.server} className="card">
+                      <div className="card-body">
+                        <h3 className="card-title">{row.label}</h3>
+                        <p className="card-id mono muted">{row.server}</p>
+                        <p className="card-meta">
+                          <Status kind={on ? 'ok' : 'warn'}>{on ? 'Enabled' : 'Disabled'}</Status>
+                        </p>
+                      </div>
+                      <div className="card-actions">
+                        <button
+                          className={on ? undefined : 'primary'}
+                          disabled={busy !== null}
+                          onClick={() => toggle(row)}
+                        >
+                          {on ? 'Disable' : 'Enable'}
+                        </button>
+                      </div>
+                    </article>
+                  )
+                })}
+              {data?.servers.length === 0 && (
+                <EmptyState>Add one on the Connections tab.</EmptyState>
+              )}
+            </ListWrap>
           )}
 
           {project &&
