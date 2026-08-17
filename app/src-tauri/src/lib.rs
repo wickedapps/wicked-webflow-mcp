@@ -8,6 +8,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             wwm::wwm_run,
             wwm::wwm_locate,
+            wwm::wwm_upgrade,
             pty::login_start,
             pty::login_write,
             pty::login_resize,

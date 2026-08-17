@@ -9,6 +9,155 @@ import * as wwm from './wwm'
 
 type Tab = 'connections' | 'projects'
 
+type AppError = {
+  message: string
+  kind: 'cli-upgrade' | 'app-upgrade' | 'generic'
+  detail?: string | null
+}
+
+function caught(e: unknown): AppError {
+  if (e instanceof wwm.WwmError) {
+    return { message: e.message, kind: e.kind, detail: e.detail }
+  }
+  const message = e instanceof Error ? e.message : String(e)
+  return {
+    message,
+    kind: message.includes('npm install -g wicked-webflow-mcp') ? 'cli-upgrade' : 'generic',
+  }
+}
+
+function EmptyState({
+  title = 'No connections yet',
+  children,
+  footer,
+  action,
+}: {
+  title?: string
+  children: ReactNode
+  footer?: ReactNode
+  action?: ReactNode
+}) {
+  return (
+    <div className="empty-state">
+      <p className="empty-state-title">{title}</p>
+      <p className="empty-state-copy">{children}</p>
+      {footer}
+      {action}
+    </div>
+  )
+}
+
+function SetupNotice({
+  title,
+  children,
+  detail,
+  actionLabel,
+  busy,
+  onAction,
+}: {
+  title: string
+  children: ReactNode
+  detail?: string | null
+  actionLabel?: string | null
+  busy: string | null
+  onAction?: () => void
+}) {
+  return (
+    <EmptyState
+      title={title}
+      footer={
+        detail ? (
+          <details className="empty-state-detail">
+            <summary>Show details</summary>
+            <pre>{detail}</pre>
+          </details>
+        ) : undefined
+      }
+      action={
+        actionLabel && onAction ? (
+          <div className="empty-state-action">
+            <button className="primary" onClick={onAction} disabled={busy !== null}>
+              {busy === 'Upgrading' ? 'Updating…' : actionLabel}
+            </button>
+          </div>
+        ) : undefined
+      }
+    >
+      {children}
+    </EmptyState>
+  )
+}
+
+function describeSetup(
+  located: wwm.Located | null,
+  error: AppError | null,
+  missingWwm: boolean,
+): {
+  title: string
+  body: ReactNode
+  actionLabel: string | null
+  detail: string | null
+} | null {
+  const pinned = wwm.usesPinnedBin(located)
+  const failed =
+    error?.kind === 'cli-upgrade' &&
+    (error.message === 'Update failed' || /Could not run `npm`/i.test(error.message))
+
+  if (error?.kind === 'app-upgrade') {
+    return {
+      title: 'Update needed',
+      body: 'This app is older than the command-line tool installed here. Download the latest version of the app.',
+      actionLabel: null,
+      detail: null,
+    }
+  }
+
+  if (failed) {
+    return {
+      title: 'Update failed',
+      body: (
+        <>
+          Try again, or run <code>npm install -g wicked-webflow-mcp</code> in a terminal.
+        </>
+      ),
+      actionLabel: pinned ? null : 'Try again',
+      detail: error.detail ?? null,
+    }
+  }
+
+  if (error?.kind === 'cli-upgrade' || missingWwm) {
+    if (pinned) {
+      return {
+        title: missingWwm ? 'Command-line tool not found' : 'Update needed',
+        body: (
+          <>
+            This app is using a local checkout. Point <code>WWM_BIN</code> at a current copy of the
+            tool.
+          </>
+        ),
+        actionLabel: null,
+        detail: null,
+      }
+    }
+    if (missingWwm && error?.kind !== 'cli-upgrade') {
+      return {
+        title: 'Command-line tool not found',
+        body: 'This app needs a command-line tool that is not installed yet.',
+        actionLabel: 'Install',
+        detail: null,
+      }
+    }
+    return {
+      title: 'Update needed',
+      body: 'The command-line tool installed here is older than this app. Update it to keep managing connections here.',
+      actionLabel: 'Update',
+      detail: null,
+    }
+  }
+
+  return null
+}
+
 const HEALTH_LABEL: Record<wwm.Health, string> = {
   connected: 'Connected',
   needs_auth: 'Needs auth',
@@ -119,15 +268,6 @@ function projectSummary(
   return `${active} active here (from ${formatSource(data.activation.source)})`
 }
 
-function EmptyState({ children }: { children: ReactNode }) {
-  return (
-    <div className="empty-state">
-      <p className="empty-state-title">No connections yet</p>
-      <p className="empty-state-copy">{children}</p>
-    </div>
-  )
-}
-
 function applyActive(data: wwm.StatusResult, active: string[]): wwm.StatusResult {
   const set = new Set(active)
   return {
@@ -173,7 +313,7 @@ export default function App() {
   const [tab, setTab] = useState<Tab>('connections')
   const [located, setLocated] = useState<wwm.Located | null>(null)
   const [data, setData] = useState<wwm.StatusResult | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<AppError | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [login, setLogin] = useState<{ server: string; label: string } | null>(null)
   const [adding, setAdding] = useState(false)
@@ -189,18 +329,41 @@ export default function App() {
       setData(await wwm.status(dir, hard))
       setError(null)
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setError(caught(e))
     } finally {
       setBusy(null)
     }
   }, [])
+
+  const upgradeCli = async () => {
+    setBusy('Upgrading')
+    try {
+      const result = await wwm.upgradeCli()
+      if (result.code !== 0) {
+        setError({
+          message: 'Update failed',
+          kind: 'cli-upgrade',
+          detail: (result.stderr || result.stdout).trim() || null,
+        })
+        return
+      }
+      const next = await wwm.locate()
+      setLocated(next)
+      setData(await wwm.status(projects.load().current, true))
+      setError(null)
+    } catch (e) {
+      setError(caught(e))
+    } finally {
+      setBusy(null)
+    }
+  }
 
   useEffect(() => {
     void (async () => {
       try {
         setLocated(await wwm.locate())
       } catch (e) {
-        setError(e instanceof Error ? e.message : String(e))
+        setError(caught(e))
         return
       }
       await refresh(projects.load().current)
@@ -221,12 +384,12 @@ export default function App() {
       await wwm.verify(project, server)
       setError(null)
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setError(caught(e))
     }
     try {
       setData(await wwm.status(project, false))
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setError(caught(e))
     } finally {
       setBusy(null)
     }
@@ -251,7 +414,7 @@ export default function App() {
       // displayed folder should be the one that gets written.
       setStore(projects.select(next.cwd))
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setError(caught(e))
     } finally {
       setPending(null)
       setBusy(null)
@@ -263,7 +426,7 @@ export default function App() {
       const dir = await projects.pick(project)
       if (dir) await useProject(dir)
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setError(caught(e))
     }
   }
 
@@ -285,7 +448,7 @@ export default function App() {
         setError(null)
       } catch (e) {
         setData(previous)
-        setError(e instanceof Error ? e.message : String(e))
+        setError(caught(e))
       } finally {
         setBusy(null)
       }
@@ -304,7 +467,7 @@ export default function App() {
         setError(null)
       } catch (e) {
         setData(previous)
-        setError(e instanceof Error ? e.message : String(e))
+        setError(caught(e))
       } finally {
         setBusy(null)
       }
@@ -345,7 +508,7 @@ export default function App() {
         })
         setLogin({ server: res.server, label: res.label || label })
       } catch (e) {
-        setError(e instanceof Error ? e.message : String(e))
+        setError(caught(e))
       } finally {
         setBusy(null)
       }
@@ -364,12 +527,15 @@ export default function App() {
         setError(null)
         setRemoving(null)
       } catch (e) {
-        setError(e instanceof Error ? e.message : String(e))
+        setError(caught(e))
       } finally {
         setBusy(null)
       }
     })()
   }
+
+  const missingWwm = located !== null && located.version === null
+  const setup = describeSetup(located, error, missingWwm)
 
   return (
     <div className="app">
@@ -390,16 +556,20 @@ export default function App() {
         </button>
       </nav>
 
-      {located && located.version === null && (
-        <p className="error">
-          Found no working <code>wwm</code> at <code>{located.path}</code> (source:{' '}
-          {located.source}). Install it with <code>npm install -g wicked-webflow-mcp</code>, or set{' '}
-          <code>WWM_BIN</code> to <code>bin/wwm</code> in a checkout.
-        </p>
+      {setup && (
+        <SetupNotice
+          title={setup.title}
+          detail={setup.detail}
+          actionLabel={setup.actionLabel}
+          busy={busy}
+          onAction={() => void upgradeCli()}
+        >
+          {setup.body}
+        </SetupNotice>
       )}
-      {error && <p className="error">{error}</p>}
+      {error && !setup && <p className="error">{error.message}</p>}
 
-      {tab === 'connections' && (
+      {tab === 'connections' && !setup && (
         <>
           <div className="pane-head">
             {data ? (
@@ -506,7 +676,7 @@ export default function App() {
         </>
       )}
 
-      {tab === 'projects' && (
+      {tab === 'projects' && !setup && (
         <>
           {((pending ?? project) || (data && data.servers.length > 0)) && (
             <ProjectBar

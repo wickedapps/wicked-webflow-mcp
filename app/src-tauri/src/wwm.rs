@@ -231,3 +231,62 @@ pub async fn wwm_locate(app: AppHandle) -> Result<serde_json::Value, String> {
         .await
         .map_err(|e| format!("wwm locate task failed: {e}"))?
 }
+
+const NPM_PACKAGE: &str = "wicked-webflow-mcp";
+
+#[derive(Serialize, Debug)]
+pub struct UpgradeOutput {
+    pub code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+fn npm_bin() -> &'static str {
+    if cfg!(windows) {
+        "npm.cmd"
+    } else {
+        "npm"
+    }
+}
+
+/// `npm install -g wicked-webflow-mcp`, using the same login-shell PATH as
+/// every other child so nvm / Homebrew node is visible from a Dock launch.
+///
+/// Refused when `WWM_BIN` is set: that pin is deliberate, and a global install
+/// would not be what the app runs next.
+fn run_upgrade() -> Result<UpgradeOutput, String> {
+    if std::env::var_os("WWM_BIN").is_some() {
+        return Err(
+            "WWM_BIN is set, so this app is not using a global install. Unset it, or point it at a \
+             current checkout."
+                .into(),
+        );
+    }
+
+    let mut cmd = Command::new(npm_bin());
+    cmd.args(["install", "-g", NPM_PACKAGE]);
+    apply_env(&mut cmd);
+    if let Some(dir) = home() {
+        cmd.current_dir(dir);
+    }
+
+    let out = cmd.output().map_err(|e| {
+        format!(
+            "Could not run `npm` ({e}).\n\nInstall Node, then run `npm install -g {NPM_PACKAGE}` \
+             in a terminal."
+        )
+    })?;
+
+    Ok(UpgradeOutput {
+        code: out.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    })
+}
+
+#[tauri::command]
+pub async fn wwm_upgrade() -> Result<UpgradeOutput, String> {
+    tauri::async_runtime::spawn_blocking(run_upgrade)
+        .await
+        .map_err(|e| format!("upgrade task failed: {e}"))?
+}

@@ -107,6 +107,8 @@ export class WwmError extends Error {
     message: string,
     readonly code: number,
     readonly detail: string | null = null,
+    /** The published CLI is what is behind; `npm install -g` is the fix. */
+    readonly kind: 'cli-upgrade' | 'app-upgrade' | 'generic' = 'generic',
   ) {
     super(message)
     this.name = 'WwmError'
@@ -117,22 +119,26 @@ export class WwmError extends Error {
  * Checked before anything else is read: on a version we do not know, the rest
  * of the payload — including the error envelope — may not mean what we think.
  */
-function assertSchema(body: Record<string, unknown>, command: string): void {
+function assertSchema(body: Record<string, unknown>): void {
   const got = body.schemaVersion
   if (got === EXPECTED_SCHEMA_VERSION) return
 
   if (got === undefined) {
     throw new WwmError(
-      `The installed wwm is older than this app: its \`${command} --json\` output carries no ` +
-        `schemaVersion. Upgrade with \`npm install -g wicked-webflow-mcp\`.`,
+      'The command-line tool installed here is older than this app.',
       -1,
+      null,
+      'cli-upgrade',
     )
   }
+  const cliOlder = typeof got === 'number' && got < EXPECTED_SCHEMA_VERSION
   throw new WwmError(
-    `wwm speaks --json schema ${String(got)}; this app was built for ` +
-      `${EXPECTED_SCHEMA_VERSION}. Upgrade whichever is older — the CLI with ` +
-      `\`npm install -g wicked-webflow-mcp\`, or this app from its release page.`,
+    cliOlder
+      ? 'The command-line tool installed here is older than this app.'
+      : 'This app is older than the command-line tool installed here. Download the latest version of the app.',
     -1,
+    null,
+    cliOlder ? 'cli-upgrade' : 'app-upgrade',
   )
 }
 
@@ -166,7 +172,7 @@ export async function run<T>(args: string[], project: Project = null): Promise<T
   }
 
   const body = out.json as Record<string, unknown>
-  assertSchema(body, args[0] ?? 'wwm')
+  assertSchema(body)
 
   if (body.ok === false) {
     throw new WwmError(
@@ -192,6 +198,19 @@ export interface Located {
 }
 
 export const locate = () => invoke<Located>('wwm_locate')
+
+export interface UpgradeResult {
+  code: number
+  stdout: string
+  stderr: string
+}
+
+/** Install or upgrade the published CLI. Refused in Rust when WWM_BIN is set. */
+export const upgradeCli = () => invoke<UpgradeResult>('wwm_upgrade')
+
+/** A global `npm install -g` would not be the binary this app is about to run. */
+export const usesPinnedBin = (located: Located | null): boolean =>
+  located?.source === 'WWM_BIN' || located?.source === 'bundled'
 
 export const status = (project: Project, refresh = false) =>
   run<StatusResult>(refresh ? ['status', '--refresh'] : ['status'], project)

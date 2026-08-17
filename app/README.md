@@ -58,6 +58,8 @@ npm run check    # tsc --noEmit
 npm run icons    # regenerate the icon set from src-tauri/icons/icon.png
 ```
 
+`app/.npmrc` refuses versions published in the last three days (`min-release-age`). That needs npm **11.10+**; Node 22 still ships 10, so `npm install -g npm@11` or use Node 24. To take a just-published patch anyway, add the package to `min-release-age-exclude` or pass `--min-release-age=0`.
+
 `npm run app:build` from the repo root is the same bundle, without the `cd`.
 
 `icon.png` is the 1024×1024 source every other size is derived from. It is not artwork on its own — it carries the macOS icon geometry: an 820×820 rounded tile centred in a transparent canvas, matching the stock system icons. `tauri icon` only resizes, so a replacement that bleeds to all four edges ships an icon that renders visibly larger than everything beside it in the Dock.

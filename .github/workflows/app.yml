@@ -30,6 +30,11 @@ jobs:
         with:
           node-version: '22'
 
+      # Node 22 still ships npm 10. min-release-age (app/.npmrc) landed in
+      # npm 11.10; without this bump the setting is a silent no-op and a
+      # freshly published malicious version would install in CI.
+      - run: npm install -g npm@^11.10.0
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt

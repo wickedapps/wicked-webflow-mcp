@@ -360,6 +360,30 @@ button.icon-btn {
   max-width: 48ch;
 }
 
+.empty-state-action {
+  margin-top: 12px;
+}
+
+.empty-state-detail {
+  margin-top: 8px;
+}
+
+.empty-state-detail summary {
+  cursor: pointer;
+}
+
+.empty-state-detail pre {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  font-size: 12px;
+  max-height: 8em;
+  overflow: auto;
+}
+
+.app > .empty-state {
+  margin-bottom: 14px;
+}
+
 /* --- project bar --- */
 
 .projectbar {
