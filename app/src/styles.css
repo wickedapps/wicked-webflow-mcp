@@ -334,9 +334,30 @@ button.icon-btn {
   color: var(--warn);
 }
 
-.empty,
 .note {
   margin-top: 16px;
+}
+
+.empty-state {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--control-radius);
+  padding: 16px 14px;
+}
+
+.empty-state-title {
+  margin: 0;
+  font-family: 'Space Grotesk', system-ui, sans-serif;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.empty-state-copy {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  max-width: 48ch;
 }
 
 /* --- project bar --- */

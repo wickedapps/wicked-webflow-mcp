@@ -112,6 +112,27 @@ function formatSource(source: string): string {
   return source === 'default (all)' ? 'default' : source
 }
 
+function projectSummary(
+  pending: string | null,
+  project: string | null,
+  data: wwm.StatusResult | null,
+): string | null {
+  if (pending) return 'Loading…'
+  if (!project || !data) return null
+  if (data.servers.length === 0) return '0 connections'
+  const active = data.servers.filter((s) => s.active).length
+  return `${active} active here (from ${formatSource(data.activation.source)})`
+}
+
+function EmptyState({ children }: { children: ReactNode }) {
+  return (
+    <div className="empty-state">
+      <p className="empty-state-title">No connections yet</p>
+      <p className="empty-state-copy">{children}</p>
+    </div>
+  )
+}
+
 function applyActive(data: wwm.StatusResult, active: string[]): wwm.StatusResult {
   const set = new Set(active)
   return {
@@ -483,11 +504,10 @@ export default function App() {
                 </div>
               </article>
             ))}
+            {data?.servers.length === 0 && (
+              <EmptyState>&ldquo;Add new&rdquo; sets one up.</EmptyState>
+            )}
           </ListWrap>
-
-          {data?.servers.length === 0 && (
-            <p className="muted empty">No connections yet. &ldquo;Add new&rdquo; sets one up.</p>
-          )}
         </>
       )}
 
@@ -499,21 +519,13 @@ export default function App() {
             home={located?.home ?? null}
             busy={busy !== null}
             loading={pending !== null}
-            summary={
-              pending
-                ? 'Loading…'
-                : project && data
-                  ? `${data.servers.filter((s) => s.active).length} active here (from ${formatSource(data.activation.source)})`
-                  : null
-            }
+            summary={projectSummary(pending, project, data)}
             onPick={() => void pickProject()}
             onSelect={(dir) => void useProject(dir)}
             onForget={(dir) => setStore(projects.forget(dir))}
-            onReset={
-              project && !pending && data?.activation.source === 'plugin state'
-                ? resetToDefault
-                : undefined
-            }
+            {...(project && !pending && data?.activation.source === 'plugin state'
+              ? { onReset: resetToDefault }
+              : {})}
           />
 
           {project && data?.activation.fileConflict && (
@@ -553,11 +565,10 @@ export default function App() {
                 </article>
               )
             })}
+            {data?.servers.length === 0 && (
+              <EmptyState>Add one on the Connections tab.</EmptyState>
+            )}
           </ListWrap>
-
-          {data?.servers.length === 0 && (
-            <p className="muted empty">No connections yet. Add one on the Connections tab.</p>
-          )}
 
           {!project && data && data.servers.length > 0 && (
             <p className="muted note">
@@ -568,6 +579,7 @@ export default function App() {
 
           {project &&
             data &&
+            data.servers.length > 0 &&
             data.servers.every((s) => !s.active) &&
             !data.activation.connectorsSuppressed && (
               <p className="muted note">
