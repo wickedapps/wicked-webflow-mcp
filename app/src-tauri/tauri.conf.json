@@ -32,6 +32,9 @@
     "targets": ["app", "dmg"],
     "category": "DeveloperTool",
     "shortDescription": "Manage multiple Webflow MCP connections for Claude Code",
+    "macOS": {
+      "signingIdentity": "-"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
