@@ -47,21 +47,46 @@ function EmptyState({
   )
 }
 
+type Notice = {
+  title: string
+  body: ReactNode
+  actionLabel: string | null
+  actionHref: string | null
+  recheck: boolean
+  detail: string | null
+}
+
 function SetupNotice({
   title,
   children,
   detail,
   actionLabel,
+  actionHref,
+  recheck,
   busy,
   onAction,
+  onRecheck,
+  onOpenError,
 }: {
   title: string
   children: ReactNode
   detail?: string | null
   actionLabel?: string | null
+  actionHref?: string | null
+  recheck?: boolean
   busy: string | null
   onAction?: () => void
+  onRecheck?: () => void
+  onOpenError?: (message: string) => void
 }) {
+  const upgrading = busy === 'Upgrading'
+  const primaryBusy =
+    upgrading && actionLabel === 'Install'
+      ? 'Installing…'
+      : upgrading
+        ? 'Updating…'
+        : actionLabel
+
   return (
     <EmptyState
       title={title}
@@ -74,11 +99,31 @@ function SetupNotice({
         ) : undefined
       }
       action={
-        actionLabel && onAction ? (
+        actionLabel || recheck ? (
           <div className="empty-state-action">
-            <button className="primary" onClick={onAction} disabled={busy !== null}>
-              {busy === 'Upgrading' ? 'Updating…' : actionLabel}
-            </button>
+            {actionHref && actionLabel ? (
+              <a
+                className="btn primary"
+                href={actionHref}
+                onClick={(e) => {
+                  e.preventDefault()
+                  void wwm.openUrl(actionHref).catch((err) => {
+                    onOpenError?.(err instanceof Error ? err.message : String(err))
+                  })
+                }}
+              >
+                {actionLabel}
+              </a>
+            ) : actionLabel && onAction ? (
+              <button className="primary" onClick={onAction} disabled={busy !== null}>
+                {primaryBusy}
+              </button>
+            ) : null}
+            {recheck && onRecheck ? (
+              <button onClick={onRecheck} disabled={busy !== null}>
+                {busy === 'Checking' ? 'Checking…' : 'Check again'}
+              </button>
+            ) : null}
           </div>
         ) : undefined
       }
@@ -88,16 +133,40 @@ function SetupNotice({
   )
 }
 
-function describeSetup(
+function nodeNotice(probe: wwm.Probe): Notice {
+  const version = probe.version ? ` Version ${probe.version} is installed.` : ''
+  return {
+    title: probe.found ? 'Node.js update needed' : 'Node.js not found',
+    body: probe.found
+      ? `This app needs Node.js ${probe.required} or later.${version}`
+      : `This app needs Node.js ${probe.required} or later.`,
+    actionLabel: 'Download Node.js',
+    actionHref: wwm.NODE_DOWNLOAD,
+    recheck: true,
+    detail: null,
+  }
+}
+
+function claudeNotice(probe: wwm.Probe): Notice {
+  const version = probe.version ? ` Version ${probe.version} is installed.` : ''
+  return {
+    title: probe.found ? 'Claude Code update needed' : 'Claude Code not found',
+    body: probe.found
+      ? `This app needs Claude Code ${probe.required} or later.${version}`
+      : `This app needs Claude Code ${probe.required} or later.`,
+    actionLabel: 'Install Claude Code',
+    actionHref: wwm.CLAUDE_INSTALL,
+    recheck: true,
+    detail: null,
+  }
+}
+
+function describeWwmSetup(
   located: wwm.Located | null,
   error: AppError | null,
-  missingWwm: boolean,
-): {
-  title: string
-  body: ReactNode
-  actionLabel: string | null
-  detail: string | null
-} | null {
+): Notice | null {
+  const missingWwm = located !== null && located.found === false
+  const staleWwm = located !== null && located.found && located.version === null
   const pinned = wwm.usesPinnedBin(located)
   const failed =
     error?.kind === 'cli-upgrade' &&
@@ -108,6 +177,8 @@ function describeSetup(
       title: 'Update needed',
       body: 'This app is older than the command-line tool installed here. Download the latest version of the app.',
       actionLabel: null,
+      actionHref: null,
+      recheck: false,
       detail: null,
     }
   }
@@ -121,11 +192,13 @@ function describeSetup(
         </>
       ),
       actionLabel: pinned ? null : 'Try again',
+      actionHref: null,
+      recheck: true,
       detail: error.detail ?? null,
     }
   }
 
-  if (error?.kind === 'cli-upgrade' || missingWwm) {
+  if (error?.kind === 'cli-upgrade' || missingWwm || staleWwm) {
     if (pinned) {
       return {
         title: missingWwm ? 'Command-line tool not found' : 'Update needed',
@@ -136,14 +209,18 @@ function describeSetup(
           </>
         ),
         actionLabel: null,
+        actionHref: null,
+        recheck: false,
         detail: null,
       }
     }
-    if (missingWwm && error?.kind !== 'cli-upgrade') {
+    if (missingWwm) {
       return {
         title: 'Command-line tool not found',
         body: 'This app needs a command-line tool that is not installed yet.',
         actionLabel: 'Install',
+        actionHref: null,
+        recheck: true,
         detail: null,
       }
     }
@@ -151,11 +228,29 @@ function describeSetup(
       title: 'Update needed',
       body: 'The command-line tool installed here is older than this app. Update it to keep managing connections here.',
       actionLabel: 'Update',
+      actionHref: null,
+      recheck: false,
       detail: null,
     }
   }
 
   return null
+}
+
+function describeNotices(
+  deps: wwm.Deps | null,
+  located: wwm.Located | null,
+  error: AppError | null,
+): Notice[] {
+  if (!deps) return []
+  const notices: Notice[] = []
+  if (!deps.node.ok) notices.push(nodeNotice(deps.node))
+  if (!deps.claude.ok) notices.push(claudeNotice(deps.claude))
+  if (deps.node.ok) {
+    const wwmSetup = describeWwmSetup(located, error)
+    if (wwmSetup) notices.push(wwmSetup)
+  }
+  return notices
 }
 
 const HEALTH_LABEL: Record<wwm.Health, string> = {
@@ -311,10 +406,11 @@ function ListWrap({ status, children }: { status: string | null; children: React
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('connections')
+  const [deps, setDeps] = useState<wwm.Deps | null>(null)
   const [located, setLocated] = useState<wwm.Located | null>(null)
   const [data, setData] = useState<wwm.StatusResult | null>(null)
   const [error, setError] = useState<AppError | null>(null)
-  const [busy, setBusy] = useState<string | null>(null)
+  const [busy, setBusy] = useState<string | null>('Loading')
   const [login, setLogin] = useState<{ server: string; label: string } | null>(null)
   const [adding, setAdding] = useState(false)
   const [removing, setRemoving] = useState<{ server: string; label: string } | null>(null)
@@ -335,6 +431,30 @@ export default function App() {
     }
   }, [])
 
+  const boot = useCallback(async (checking = false) => {
+    setBusy(checking ? 'Checking' : 'Loading')
+    setError(null)
+    try {
+      const next = await wwm.checkDeps()
+      setDeps(next)
+      if (!next.node.ok || !next.claude.ok) {
+        setData(null)
+        return
+      }
+      const found = await wwm.locate()
+      setLocated(found)
+      if (!found.found || found.version === null) {
+        setData(null)
+        return
+      }
+      setData(await wwm.status(projects.load().current, false))
+    } catch (e) {
+      setError(caught(e))
+    } finally {
+      setBusy(null)
+    }
+  }, [])
+
   const upgradeCli = async () => {
     setBusy('Upgrading')
     try {
@@ -347,10 +467,7 @@ export default function App() {
         })
         return
       }
-      const next = await wwm.locate()
-      setLocated(next)
-      setData(await wwm.status(projects.load().current, true))
-      setError(null)
+      await boot(false)
     } catch (e) {
       setError(caught(e))
     } finally {
@@ -359,16 +476,8 @@ export default function App() {
   }
 
   useEffect(() => {
-    void (async () => {
-      try {
-        setLocated(await wwm.locate())
-      } catch (e) {
-        setError(caught(e))
-        return
-      }
-      await refresh(projects.load().current)
-    })()
-  }, [refresh])
+    void boot(false)
+  }, [boot])
 
   /**
    * Verify, then always re-read status.
@@ -534,8 +643,8 @@ export default function App() {
     })()
   }
 
-  const missingWwm = located !== null && located.version === null
-  const setup = describeSetup(located, error, missingWwm)
+  const notices = describeNotices(deps, located, error)
+  const setup = notices.length > 0
 
   return (
     <div className="app">
@@ -556,17 +665,22 @@ export default function App() {
         </button>
       </nav>
 
-      {setup && (
+      {notices.map((notice) => (
         <SetupNotice
-          title={setup.title}
-          detail={setup.detail}
-          actionLabel={setup.actionLabel}
+          key={notice.title}
+          title={notice.title}
+          detail={notice.detail}
+          actionLabel={notice.actionLabel}
+          actionHref={notice.actionHref}
+          recheck={notice.recheck}
           busy={busy}
           onAction={() => void upgradeCli()}
+          onRecheck={() => void boot(true)}
+          onOpenError={(message) => setError({ message, kind: 'generic' })}
         >
-          {setup.body}
+          {notice.body}
         </SetupNotice>
-      )}
+      ))}
       {error && !setup && <p className="error">{error.message}</p>}
 
       {tab === 'connections' && !setup && (

@@ -1,18 +1,10 @@
-// Typed client for the CLI. When bumping EXPECTED_SCHEMA_VERSION, update the
-// interfaces below in the same commit — they are the other half of the contract.
+// Typed client for the CLI.
 
 import { invoke } from '@tauri-apps/api/core'
 
-/**
- * The CLI --json schema this build speaks (bin/wwm's SCHEMA_VERSION).
- *
- * The app and the CLI install separately and upgrade separately, so they will
- * disagree eventually. Better one clear sentence about which to upgrade than a
- * screen of fields that silently read `undefined`.
- */
+/** The CLI --json schema this build speaks (`SCHEMA_VERSION` in bin/wwm). */
 export const EXPECTED_SCHEMA_VERSION = 1
 
-/** Stamped on every payload by bin/wwm's emitJson. Always the first key. */
 interface Envelope {
   schemaVersion: number
 }
@@ -54,7 +46,6 @@ export interface ConnectResult extends Envelope {
   server: string
   label: string
   scope: string
-  /** Always present from this app: `connect` is called with `--print-command`. */
   loginCommand?: string
   authorized?: boolean
   verified?: unknown
@@ -93,7 +84,7 @@ interface RawOutput {
   stderr: string
 }
 
-/** bin/wwm's EXIT map, for messages worth phrasing better than "exit 4". */
+/** bin/wwm exit codes. */
 const EXIT_MEANING: Record<number, string> = {
   2: 'The app called wwm incorrectly.',
   3: 'Preflight failed — check that the `claude` CLI is installed and current.',
@@ -107,7 +98,6 @@ export class WwmError extends Error {
     message: string,
     readonly code: number,
     readonly detail: string | null = null,
-    /** The published CLI is what is behind; `npm install -g` is the fix. */
     readonly kind: 'cli-upgrade' | 'app-upgrade' | 'generic' = 'generic',
   ) {
     super(message)
@@ -115,10 +105,7 @@ export class WwmError extends Error {
   }
 }
 
-/**
- * Checked before anything else is read: on a version we do not know, the rest
- * of the payload — including the error envelope — may not mean what we think.
- */
+/** Reject payloads this build does not know how to read. */
 function assertSchema(body: Record<string, unknown>): void {
   const got = body.schemaVersion
   if (got === EXPECTED_SCHEMA_VERSION) return
@@ -142,23 +129,12 @@ function assertSchema(body: Record<string, unknown>): void {
   )
 }
 
-/**
- * A project directory, or null for "none chosen yet".
- *
- * Threaded explicitly through every call rather than held as module state:
- * which directory a command ran in is the difference between two completely
- * different answers from `status`, and it should be impossible to write one
- * without saying which.
- */
+/** Project directory, or null if none is chosen yet. */
 export type Project = string | null
 
 /**
- * Run a wwm command in `project`. `--json` is appended by the Rust side if
+ * Run a wwm command in `project`. `--json` is appended on the Rust side if
  * absent; a null project runs in HOME.
- *
- * A non-zero exit still carries parsed JSON — every failure path in the CLI
- * emits `{ok: false, error, detail, exitCode}` — so failures arrive here as a
- * structured WwmError rather than a wall of stderr.
  */
 export async function run<T>(args: string[], project: Project = null): Promise<T> {
   const out = await invoke<RawOutput>('wwm_run', { args, cwd: project })
@@ -186,18 +162,38 @@ export async function run<T>(args: string[], project: Project = null): Promise<T
 }
 
 export interface Located {
-  path: string
+  found: boolean
+  path: string | null
   source: 'WWM_BIN' | 'bundled' | 'PATH'
   version: string | null
-  /** null on any wwm predating the contract. */
   schemaVersion: number | null
   path_env: string | null
-  /** For abbreviating project paths to `~/…`. */
   home: string | null
   stderr: string
 }
 
 export const locate = () => invoke<Located>('wwm_locate')
+
+export const NODE_DOWNLOAD = 'https://nodejs.org/en/download'
+export const CLAUDE_INSTALL =
+  'https://code.claude.com/docs/en/quickstart#step-1-install-claude-code'
+
+export interface Probe {
+  found: boolean
+  ok: boolean
+  path: string | null
+  version: string | null
+  required: string
+}
+
+export interface Deps {
+  node: Probe
+  claude: Probe
+}
+
+export const checkDeps = () => invoke<Deps>('deps_check')
+
+export const openUrl = (url: string) => invoke<void>('open_url', { url })
 
 export interface UpgradeResult {
   code: number
@@ -205,57 +201,32 @@ export interface UpgradeResult {
   stderr: string
 }
 
-/** Install or upgrade the published CLI. Refused in Rust when WWM_BIN is set. */
+/** Install or upgrade the published CLI. */
 export const upgradeCli = () => invoke<UpgradeResult>('wwm_upgrade')
 
-/** A global `npm install -g` would not be the binary this app is about to run. */
 export const usesPinnedBin = (located: Located | null): boolean =>
   located?.source === 'WWM_BIN' || located?.source === 'bundled'
 
 export const status = (project: Project, refresh = false) =>
   run<StatusResult>(refresh ? ['status', '--refresh'] : ['status'], project)
 
-/**
- * Add the server. Never authorizes — `--print-command` makes the CLI return
- * the login command, which LoginTerminal then runs on a pty.
- *
- * Registration is user-scope; the project is still passed so any paths the
- * CLI prints match the directory on screen.
- */
 export const connect = (project: Project, slug: string, label?: string) =>
   run<ConnectResult>(
     ['connect', slug, ...(label ? ['--label', label] : []), '--print-command'],
     project,
   )
 
-/**
- * Set the connections active in `project`.
- *
- * `switch` takes slugs or full server names — toServerName() normalizes both.
- * It writes `projects[<project>].disabledMcpServers` in ~/.claude.json, so the
- * directory is not cosmetic here: it is what gets written.
- */
 export const switchTo = (project: Project, servers: string[]) =>
   run<SwitchResult>(servers.length === 0 ? ['switch', '--none'] : ['switch', ...servers], project)
 
-/**
- * Forget this folder's remembered set so every connection loads, including ones
- * added later. `--all` is not this: it snapshots the current names into plugin
- * state, and a connection added afterwards stays off.
- */
 export const switchDefault = (project: Project) =>
   run<SwitchResult>(['switch', '--default'], project)
 
 export const verify = (project: Project, server?: string) =>
   run<VerifyResult>(server ? ['verify', server] : ['verify'], project)
 
-/** Destroys the OAuth grant at every scope. Not the per-project off switch — that is `switchTo`. */
 export const remove = (project: Project, server: string) =>
   run<{ ok: boolean }>(['remove', server, '--yes'], project)
-
-// Mirror of slugify()/validateSlug() in bin/wwm, for the Add-client preview.
-// The CLI revalidates and exits 2 on anything bad, so drift here costs a
-// wrong preview, never a wrong connection.
 
 export const slugify = (input: string): string =>
   input
@@ -263,7 +234,6 @@ export const slugify = (input: string): string =>
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
 
-/** Server names become tool-name prefixes, so every character is paid for in every session. */
 export function validateSlug(slug: string): string | null {
   if (!slug) return 'empty once punctuation and spaces are removed'
   if (!/^[a-z0-9][a-z0-9-]*$/.test(slug)) return 'must be lowercase letters, digits and hyphens'

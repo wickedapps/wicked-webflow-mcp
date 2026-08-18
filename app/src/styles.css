@@ -133,7 +133,8 @@ p {
   justify-content: flex-end;
 }
 
-button {
+button,
+a.btn {
   background: var(--secondary);
   color: var(--fg);
   border: 1px solid var(--line);
@@ -143,11 +144,20 @@ button {
   cursor: pointer;
 }
 
-button:hover:not(:disabled) {
+a.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
+
+button:hover:not(:disabled),
+a.btn:hover {
   background: #e8eaee;
 }
 
-button:focus-visible {
+button:focus-visible,
+a.btn:focus-visible {
   outline: none;
   box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--ring);
 }
@@ -157,14 +167,16 @@ button:disabled {
   cursor: default;
 }
 
-button.primary {
+button.primary,
+a.btn.primary {
   background: var(--primary);
   color: var(--primary-fg);
   border-color: transparent;
   box-shadow: 0 -2px rgb(0 0 0 / 20%) inset;
 }
 
-button.primary:hover:not(:disabled) {
+button.primary:hover:not(:disabled),
+a.btn.primary:hover {
   background: #1754bc;
 }
 
@@ -361,6 +373,10 @@ button.icon-btn {
 }
 
 .empty-state-action {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
   margin-top: 12px;
 }
 

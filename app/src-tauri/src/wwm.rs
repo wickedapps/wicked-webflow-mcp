@@ -4,51 +4,61 @@
 
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::OnceLock;
+use std::sync::Mutex;
 
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
-/// Where the CLI was found. Surfaced in the UI so a stale global install or a
-/// shadowed PATH is diagnosable without guesswork.
+/// Where the CLI was found.
 #[derive(Serialize, Clone, Debug)]
 pub struct Located {
     pub path: String,
     pub source: String,
 }
 
-/// The user's real PATH, as their login shell would build it.
-///
 /// A GUI launched from Finder or the Dock inherits a minimal PATH — roughly
 /// `/usr/bin:/bin:/usr/sbin:/sbin` — not the one from .zshrc. Anyone running
 /// node through nvm (or Homebrew on Apple silicon) has `wwm` somewhere that
 /// PATH cannot see, and `wwm` in turn shells out to `claude`, which has the
 /// same problem one level down. So we ask the login shell once and hand the
 /// answer to every child.
-fn login_shell_path() -> Option<String> {
-    static CACHE: OnceLock<Option<String>> = OnceLock::new();
-    CACHE
-        .get_or_init(|| {
-            if cfg!(windows) {
-                return None;
-            }
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-            // -i so interactive-only rc files (where nvm usually lives) run.
-            let out = Command::new(shell)
-                .args(["-ilc", "printf %s \"$PATH\""])
-                .output()
-                .ok()?;
-            let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if path.is_empty() {
-                None
-            } else {
-                Some(path)
-            }
-        })
-        .clone()
+static LOGIN_PATH: Mutex<Option<Option<String>>> = Mutex::new(None);
+
+fn login_path_lock() -> std::sync::MutexGuard<'static, Option<Option<String>>> {
+    LOGIN_PATH.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Apply the resolved PATH to a child process. Also used by the pty module.
+fn compute_login_shell_path() -> Option<String> {
+    if cfg!(windows) {
+        return None;
+    }
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    // -i so interactive-only rc files (where nvm usually lives) run.
+    let out = Command::new(shell)
+        .args(["-ilc", "printf %s \"$PATH\""])
+        .output()
+        .ok()?;
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if path.is_empty() {
+        None
+    } else {
+        Some(path)
+    }
+}
+
+fn login_shell_path() -> Option<String> {
+    let mut guard = login_path_lock();
+    if guard.is_none() {
+        *guard = Some(compute_login_shell_path());
+    }
+    (*guard).clone().flatten()
+}
+
+fn invalidate_login_path() {
+    *login_path_lock() = None;
+}
+
+/// Apply the login-shell PATH to a child process.
 pub fn apply_env(cmd: &mut Command) {
     if let Some(path) = login_shell_path() {
         cmd.env("PATH", path);
@@ -65,17 +75,66 @@ pub fn home() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+fn path_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let mut add = |raw: &str| {
+        for dir in std::env::split_paths(raw) {
+            if !dir.as_os_str().is_empty() && !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
+        }
+    };
+    if let Some(path) = login_shell_path() {
+        add(&path);
+    }
+    if let Ok(path) = std::env::var("PATH") {
+        add(&path);
+    }
+    dirs
+}
+
+/// Look for `name` on the login-shell PATH, then common install locations.
+pub(crate) fn find_bin(name: &str, extras: &[PathBuf], refresh: bool) -> Option<PathBuf> {
+    if refresh {
+        invalidate_login_path();
+    }
+    let exe = if cfg!(windows) && !name.contains('.') {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    };
+    for dir in path_dirs() {
+        let candidate = dir.join(&exe);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        if cfg!(windows) {
+            let cmd = dir.join(format!("{name}.cmd"));
+            if cmd.is_file() {
+                return Some(cmd);
+            }
+        }
+    }
+    extras.iter().find(|p| p.is_file()).cloned()
+}
+
+fn wwm_extras() -> Vec<PathBuf> {
+    let mut v = vec![
+        PathBuf::from("/opt/homebrew/bin/wwm"),
+        PathBuf::from("/usr/local/bin/wwm"),
+    ];
+    if let Some(dir) = home() {
+        v.push(dir.join(".local").join("bin").join("wwm"));
+        v.push(dir.join(".npm-global").join("bin").join("wwm"));
+    }
+    v
+}
+
 /// The directory a command runs in.
 ///
-/// `status` and `switch` are per-project: they read and write
-/// `~/.claude.json`'s `projects[<resolved cwd>].disabledMcpServers`. An app
-/// launched from Finder inherits `/` as its cwd, so without this every
-/// activation answer would silently be about the filesystem root — and the
-/// first toggle would write a disable list for `/`.
-///
-/// So the frontend always names the directory, and a stale one (a folder since
-/// moved, deleted, or on an unmounted volume — all reachable from a persisted
-/// recents list) fails here with something readable instead of an errno.
+/// `status` and `switch` are keyed on cwd. A Finder launch inherits `/`, so
+/// without an explicit directory every answer would be about the filesystem
+/// root, and the first toggle would write a disable list for `/`.
 fn working_dir(cwd: Option<String>) -> Result<PathBuf, String> {
     let Some(raw) = cwd else {
         return home().ok_or_else(|| "Could not determine a home directory.".to_string());
@@ -93,17 +152,15 @@ fn working_dir(cwd: Option<String>) -> Result<PathBuf, String> {
 
 /// `WWM_BIN` -> bundled sidecar -> PATH.
 ///
-/// The sidecar path is unused today: `wwm` already needs the `claude` CLI, so
-/// anyone using this app has a developer environment. Bundling node only
-/// matters if this ever ships to people who do not.
-pub fn locate(app: &AppHandle) -> Result<Located, String> {
+/// `Ok(None)` means it is not installed. `Err` means `WWM_BIN` points at nothing.
+pub fn locate(app: &AppHandle) -> Result<Option<Located>, String> {
     if let Ok(raw) = std::env::var("WWM_BIN") {
         let path = PathBuf::from(&raw);
         if path.is_file() {
-            return Ok(Located {
+            return Ok(Some(Located {
                 path: raw,
                 source: "WWM_BIN".into(),
-            });
+            }));
         }
         return Err(format!("WWM_BIN is set to {raw}, which is not a file."));
     }
@@ -111,17 +168,17 @@ pub fn locate(app: &AppHandle) -> Result<Located, String> {
     if let Ok(dir) = app.path().resource_dir() {
         let candidate = dir.join("bin").join("wwm");
         if candidate.is_file() {
-            return Ok(Located {
+            return Ok(Some(Located {
                 path: candidate.to_string_lossy().into_owned(),
                 source: "bundled".into(),
-            });
+            }));
         }
     }
 
-    Ok(Located {
-        path: "wwm".into(),
+    Ok(find_bin("wwm", &wwm_extras(), false).map(|path| Located {
+        path: path.to_string_lossy().into_owned(),
         source: "PATH".into(),
-    })
+    }))
 }
 
 #[derive(Serialize, Debug)]
@@ -133,22 +190,22 @@ pub struct Output {
     /// Parsed stdout. Present even on failure: every error path emits
     /// `{ok: false, error, detail, exitCode}` under --json.
     pub json: Option<serde_json::Value>,
-    /// Human-readable half. Worth showing when `json` is None.
+    /// Human-readable stderr, for when `json` is missing.
     pub stderr: String,
 }
 
-/// Run `wwm <args> --json` in `cwd` and hand back the parsed result.
+/// Run `wwm <args> --json` in `cwd`.
 ///
-/// Running the CLI *in* the project directory rather than passing it a flag is
-/// deliberate: `--project` exists only on `switch` and `activate`, so a flag
-/// would be silently ignored by `status` and the list would describe a
-/// different directory than the toggles wrote to.
-///
-/// This is the blocking half. The Tauri commands wrap it in `spawn_blocking`:
-/// a sync `#[tauri::command]` runs on the UI thread, and `Command::output()`
-/// waiting on `claude mcp list` would freeze the window until the child exited.
+/// Commands run *in* the project directory: `--project` exists only on
+/// `switch` and `activate`, so a flag would be ignored by `status`.
+/// Wrapped in `spawn_blocking` because `claude mcp list` would otherwise
+/// freeze the UI thread.
 fn run_wwm(app: &AppHandle, args: Vec<String>, cwd: Option<String>) -> Result<Output, String> {
-    let bin = locate(app)?;
+    let bin = locate(app)?.ok_or_else(|| {
+        "Could not run `wwm`.\n\nInstall it with `npm install -g wicked-webflow-mcp`, \
+         or set WWM_BIN to the path of bin/wwm in a checkout."
+            .to_string()
+    })?;
     let dir = working_dir(cwd)?;
 
     let mut argv = args;
@@ -192,9 +249,20 @@ pub async fn wwm_run(
 }
 
 fn locate_full(app: &AppHandle) -> Result<serde_json::Value, String> {
-    let bin = locate(app)?;
-    // No cwd: `version` is not per-project, and this runs before the user has
-    // chosen a directory.
+    let home = home().map(|p| p.to_string_lossy().into_owned());
+    let path_env = resolved_path();
+    let Some(bin) = locate(app)? else {
+        return Ok(serde_json::json!({
+            "found": false,
+            "path": null,
+            "source": "PATH",
+            "version": null,
+            "schemaVersion": null,
+            "path_env": path_env,
+            "home": home,
+            "stderr": "",
+        }));
+    };
     let out = run_wwm(app, vec!["version".into()], None)?;
     let version = out
         .json
@@ -202,8 +270,6 @@ fn locate_full(app: &AppHandle) -> Result<serde_json::Value, String> {
         .and_then(|v| v.get("version"))
         .and_then(|v| v.as_str())
         .map(String::from);
-    // Absent on any wwm predating the contract. The frontend enforces the
-    // match; this is here so the diagnostic banner can name the number.
     let schema_version = out
         .json
         .as_ref()
@@ -211,20 +277,18 @@ fn locate_full(app: &AppHandle) -> Result<serde_json::Value, String> {
         .and_then(serde_json::Value::as_u64);
 
     Ok(serde_json::json!({
+        "found": true,
         "path": bin.path,
         "source": bin.source,
         "version": version,
         "schemaVersion": schema_version,
-        "path_env": resolved_path(),
-        // So the UI can abbreviate project paths to `~/…` without a second
-        // round trip or a path-API permission.
-        "home": home().map(|p| p.to_string_lossy().into_owned()),
+        "path_env": path_env,
+        "home": home,
         "stderr": out.stderr,
     }))
 }
 
-/// Where the CLI is and what version it reports. The UI calls this at startup
-/// so a missing or mismatched install is one clear message, not five failures.
+/// Where the CLI is and what version it reports.
 #[tauri::command]
 pub async fn wwm_locate(app: AppHandle) -> Result<serde_json::Value, String> {
     tauri::async_runtime::spawn_blocking(move || locate_full(&app))
@@ -265,6 +329,7 @@ fn run_upgrade() -> Result<UpgradeOutput, String> {
 
     let mut cmd = Command::new(npm_bin());
     cmd.args(["install", "-g", NPM_PACKAGE]);
+    invalidate_login_path();
     apply_env(&mut cmd);
     if let Some(dir) = home() {
         cmd.current_dir(dir);

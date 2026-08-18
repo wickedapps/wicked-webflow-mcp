@@ -62,7 +62,7 @@ npm install -g wicked-webflow-mcp
 Run `wwm` with no arguments and you get a dashboard and a menu:
 
 ```
-  wwm 0.5.1                                  ~/work/dino-site
+  wwm 0.6.1                                  ~/work/dino-site
 
   ●  wf-dino        Dino Studios       1 site · Dino                   2d ago
   ○  wf-stonesboots Stones & Boots     3 sites · S&B, S&B EU, +1       5d ago
@@ -177,7 +177,7 @@ Because that output now has a consumer that ships on its own cadence, it is a ve
 Versions are declared independently in `package.json`, `bin/wwm`, `plugin.json`, `marketplace.json`, `Cargo.toml` and `tauri.conf.json`. Never edit them by hand:
 
 ```
-npm run release -- 0.6.0    # stamp everywhere
+npm run release -- 0.6.1    # stamp everywhere
 npm run version:check       # what CI runs
 ```
 

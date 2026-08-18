@@ -1,3 +1,4 @@
+mod deps;
 mod pty;
 mod wwm;
 
@@ -9,6 +10,8 @@ pub fn run() {
             wwm::wwm_run,
             wwm::wwm_locate,
             wwm::wwm_upgrade,
+            deps::deps_check,
+            deps::open_url,
             pty::login_start,
             pty::login_write,
             pty::login_resize,
