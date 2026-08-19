@@ -199,6 +199,20 @@ function describeWwmSetup(
   }
 
   if (error?.kind === 'cli-upgrade' || missingWwm || staleWwm) {
+    // The bundled copy is present but would not run. Node is the overwhelmingly
+    // likely cause — it is the one prerequisite bundling does not remove — and
+    // there is nothing to install, so this offers a re-check rather than a fix
+    // it cannot perform.
+    if (wwm.usesBundledBin(located)) {
+      return {
+        title: 'Command-line tool could not run',
+        body: 'This app includes its own copy of the command-line tool, but it did not start. Check that Node.js 22 or later is installed.',
+        actionLabel: null,
+        actionHref: null,
+        recheck: true,
+        detail: null,
+      }
+    }
     if (pinned) {
       return {
         title: missingWwm ? 'Command-line tool not found' : 'Update needed',

@@ -31,6 +31,9 @@
     "active": true,
     "targets": ["app", "dmg"],
     "category": "DeveloperTool",
+    "resources": {
+      "../../bin/wwm": "bin/wwm"
+    },
     "shortDescription": "Manage multiple Webflow MCP connections for Claude Code",
     "macOS": {
       "signingIdentity": "-"

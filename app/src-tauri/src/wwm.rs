@@ -130,6 +130,33 @@ fn wwm_extras() -> Vec<PathBuf> {
     v
 }
 
+/// Build the command that runs the located CLI.
+///
+/// An installed copy is executed directly, the way it always has been: npm
+/// wrote a `.cmd` shim on Windows, and everywhere else the shebang does the
+/// work. A *bundled* copy has neither. It is a plain file that Tauri copied
+/// into a read-only app bundle, so the executable bit may not have survived the
+/// copy, and on Windows a shebang means nothing at all. So it is handed to
+/// `node` explicitly.
+///
+/// This is why Node stays a real prerequisite even once the CLI ships inside
+/// the app: `bin/wwm` is a Node program, and bundling it removes the install
+/// step, not the runtime.
+fn cli_command(bin: &Located) -> Result<Command, String> {
+    if bin.source != "bundled" {
+        return Ok(Command::new(&bin.path));
+    }
+
+    let node = find_bin("node", &crate::deps::node_extras(), false).ok_or_else(|| {
+        "Could not find Node.js, which this app needs to run its bundled command-line tool.\n\n\
+         Install Node.js 22 or later, then try again."
+            .to_string()
+    })?;
+    let mut cmd = Command::new(node);
+    cmd.arg(&bin.path);
+    Ok(cmd)
+}
+
 /// The directory a command runs in.
 ///
 /// `status` and `switch` are keyed on cwd. A Finder launch inherits `/`, so
@@ -213,7 +240,7 @@ fn run_wwm(app: &AppHandle, args: Vec<String>, cwd: Option<String>) -> Result<Ou
         argv.push("--json".into());
     }
 
-    let mut cmd = Command::new(&bin.path);
+    let mut cmd = cli_command(&bin)?;
     cmd.args(&argv);
     cmd.current_dir(&dir);
     apply_env(&mut cmd);
@@ -318,13 +345,25 @@ fn npm_bin() -> &'static str {
 ///
 /// Refused when `WWM_BIN` is set: that pin is deliberate, and a global install
 /// would not be what the app runs next.
-fn run_upgrade() -> Result<UpgradeOutput, String> {
+fn run_upgrade(app: &AppHandle) -> Result<UpgradeOutput, String> {
     if std::env::var_os("WWM_BIN").is_some() {
         return Err(
             "WWM_BIN is set, so this app is not using a global install. Unset it, or point it at a \
              current checkout."
                 .into(),
         );
+    }
+
+    // Same reasoning as the WWM_BIN guard: a global install would not be what
+    // the app runs next, so doing one would report success and change nothing.
+    if let Ok(Some(bin)) = locate(app) {
+        if bin.source == "bundled" {
+            return Err(
+                "This app ships its own copy of the command-line tool, so there is nothing to \
+                 install. Update the app itself to get a newer one."
+                    .into(),
+            );
+        }
     }
 
     let mut cmd = Command::new(npm_bin());
@@ -350,8 +389,8 @@ fn run_upgrade() -> Result<UpgradeOutput, String> {
 }
 
 #[tauri::command]
-pub async fn wwm_upgrade() -> Result<UpgradeOutput, String> {
-    tauri::async_runtime::spawn_blocking(run_upgrade)
+pub async fn wwm_upgrade(app: AppHandle) -> Result<UpgradeOutput, String> {
+    tauri::async_runtime::spawn_blocking(move || run_upgrade(&app))
         .await
         .map_err(|e| format!("upgrade task failed: {e}"))?
 }

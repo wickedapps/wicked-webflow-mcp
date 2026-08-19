@@ -137,7 +137,7 @@ fn probe_named(
     }
 }
 
-fn node_extras() -> Vec<PathBuf> {
+pub(crate) fn node_extras() -> Vec<PathBuf> {
     vec![
         PathBuf::from("/opt/homebrew/bin/node"),
         PathBuf::from("/usr/local/bin/node"),

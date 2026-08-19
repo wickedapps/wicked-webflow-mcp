@@ -207,6 +207,17 @@ export const upgradeCli = () => invoke<UpgradeResult>('wwm_upgrade')
 export const usesPinnedBin = (located: Located | null): boolean =>
   located?.source === 'WWM_BIN' || located?.source === 'bundled'
 
+/**
+ * The CLI shipped inside the app, rather than installed by the user.
+ *
+ * Both this and `WWM_BIN` are "pinned" — neither can be fixed by installing
+ * from npm — but they fail for opposite reasons and cannot share a message:
+ * a stale `WWM_BIN` is a checkout the user chose and must repoint, whereas a
+ * bundled copy that will not run is almost always a missing Node.
+ */
+export const usesBundledBin = (located: Located | null): boolean =>
+  located?.source === 'bundled'
+
 export const status = (project: Project, refresh = false) =>
   run<StatusResult>(refresh ? ['status', '--refresh'] : ['status'], project)
 
