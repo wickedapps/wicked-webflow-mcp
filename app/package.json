@@ -12,7 +12,8 @@
     "icons": "tauri icon src-tauri/icons/icon.png",
     "tauri": "tauri",
     "version:check": "npm --prefix .. run version:check",
-    "release": "npm --prefix .. run release --"
+    "release": "npm --prefix .. run release --",
+    "release:github": "npm --prefix .. run release:github"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.1.1",

@@ -179,9 +179,12 @@ Versions are declared independently in `package.json`, `bin/wwm`, `plugin.json`,
 ```
 npm run release -- 0.6.1    # stamp everywhere
 npm run version:check       # what CI runs
+npm run release:github      # attach the local .dmg to a GitHub Release tagged v<version>
 ```
 
-Both live in the root `package.json`. Run them from the repo root — inside `app/`, npm resolves `app/package.json` instead, which owns the desktop app's own scripts. It forwards these two up so either directory works.
+`release:github` does not stamp or build. It refuses if the version files disagree, or if `npm run app:build` has not produced a `.dmg`.
+
+They live in the root `package.json`. Run them from the repo root — inside `app/`, npm resolves `app/package.json` instead, which owns the desktop app's own scripts. It forwards these up so either directory works.
 
 ---
 

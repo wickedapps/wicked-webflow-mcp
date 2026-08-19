@@ -10,11 +10,13 @@
 //   node scripts/release.mjs check          verify all five agree
 //   node scripts/release.mjs stamp 0.6.0    write 0.6.0 everywhere
 //   node scripts/release.mjs stamp          write package.json's version everywhere
+//   node scripts/release.mjs github         attach the local .dmg to a GitHub Release
 //
 // Edits are surgical regex replacements, not JSON.parse/stringify round-trips,
 // so hand-formatting (compact keyword arrays, comments in Cargo.toml) survives.
 
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -136,12 +138,62 @@ function stamp(requested) {
   return 0
 }
 
+const DMG_DIR = join(ROOT, 'app/src-tauri/target/release/bundle/dmg')
+
+/**
+ * Publish the locally built .dmg as a GitHub Release tagged v<version>.
+ * Does not stamp or commit — `check` must already pass, and `npm run app:build`
+ * must already have produced the artifact.
+ */
+function github() {
+  const code = check()
+  if (code !== 0) return code
+
+  const { found } = load()
+  const version = found.find((f) => f.file === 'package.json')?.version
+  if (!version) throw new Error('no version found in package.json')
+
+  if (!existsSync(DMG_DIR)) {
+    throw new Error(
+      `no .dmg at ${relative(ROOT, DMG_DIR)}. Run \`npm run app:build\` first.`,
+    )
+  }
+  const dmgs = readdirSync(DMG_DIR)
+    .filter((name) => name.endsWith('.dmg'))
+    .map((name) => join(DMG_DIR, name))
+  if (dmgs.length === 0) {
+    throw new Error(
+      `no .dmg in ${relative(ROOT, DMG_DIR)}. Run \`npm run app:build\` first.`,
+    )
+  }
+
+  const args = [
+    'release',
+    'create',
+    `v${version}`,
+    '--title',
+    version,
+    '--notes',
+    'Wicked Webflow MCP Manager for macOS.',
+    ...dmgs,
+  ]
+  const result = spawnSync('gh', args, { cwd: ROOT, stdio: 'inherit' })
+  if (result.error) {
+    if (result.error.code === 'ENOENT') {
+      throw new Error('gh is not installed. https://cli.github.com/')
+    }
+    throw result.error
+  }
+  return result.status ?? 1
+}
+
 const [mode = 'check', arg] = process.argv.slice(2)
 try {
   if (mode === 'check') process.exit(check())
   else if (mode === 'stamp') process.exit(stamp(arg))
+  else if (mode === 'github') process.exit(github())
   else {
-    console.error(`usage: release.mjs check | stamp [version]`)
+    console.error(`usage: release.mjs check | stamp [version] | github`)
     process.exit(2)
   }
 } catch (e) {
