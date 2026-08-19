@@ -5,7 +5,7 @@
   "description": "Desktop front end for the wwm CLI. Never published — deliberately has no version field, so scripts/release.mjs has one fewer place to keep in step.",
   "scripts": {
     "dev": "tauri dev",
-    "build": "sh ./with-env.sh tauri build",
+    "build": "sh ./with-env.sh sh -c 'tauri build && sh ./notarize-dmg.sh'",
     "dev:vite": "vite",
     "build:vite": "tsc --noEmit && vite build",
     "check": "tsc --noEmit",

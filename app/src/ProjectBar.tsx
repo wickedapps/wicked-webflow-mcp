@@ -60,7 +60,8 @@ export function ProjectBar({
       <div className="projectbar-main">
         {current ? (
           <h2 className="pane-heading projectbar-path" title={current}>
-            {abbreviate(current, home)}
+            {/* rtl on the h2 picks which end clips; the bdi keeps the path itself LTR */}
+            <bdi>{abbreviate(current, home)}</bdi>
           </h2>
         ) : (
           <h2 className="pane-heading">No folder selected</h2>

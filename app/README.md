@@ -1,6 +1,20 @@
 # Wicked Webflow MCP Manager
 
-A GUI over the `wwm` CLI. It does not reimplement any of it.
+The desktop app for [Wicked Webflow MCP](../README.md). Authorize each client's Webflow MCP connection once, see what each grant actually reaches, and load only the ones the current project needs.
+
+[**Download for macOS (Apple silicon)**](https://github.com/wickedapps/wicked-webflow-mcp/releases/latest) — the `.dmg` from [GitHub Releases](https://github.com/wickedapps/wicked-webflow-mcp/releases).
+
+![Connections tab: two authorized clients and the sites each grant reaches](docs/connections.png)
+
+*Every client stays authorized. Verify shows the sites the grant can actually reach.*
+
+![Projects tab: enable only the clients this folder should load](docs/projects.png)
+
+*Enable only what this folder should load. The rest stay connected, just not in this project.*
+
+It is a GUI over the `wwm` CLI. It does not reimplement any of it. The `.dmg` ships a copy of `wwm`; you still need Claude Code **2.1.186+** and Node **22+**, because authorizing is `claude mcp login` and `wwm` is a Node program. GitHub Releases are signed with a Developer ID and notarized.
+
+The Claude Code plugin and the CLI are documented in the [root README](../README.md). This file is the app: why a desktop process exists, how it talks to `wwm`, and how to build it.
 
 ## Why it exists
 
@@ -48,15 +62,19 @@ A GUI launched from Finder inherits a minimal `PATH` — it cannot see a node in
   WWM_BIN="$(git rev-parse --show-toplevel)/bin/wwm" npm run dev
   ```
 
+A release build embeds `bin/wwm` in the `.dmg`, so end users do not need a global install. Node is still required: the bundled copy is a Node program, not a compiled binary.
+
 ## Commands
 
 ```
 npm install
 npm run dev      # vite + tauri, hot reload
-npm run build    # bundle for this platform
+npm run build    # bundle for this platform (loads app/.env)
 npm run check    # tsc --noEmit
 npm run icons    # regenerate the icon set from src-tauri/icons/icon.png
 ```
+
+`npm run build` loads `app/.env` through `with-env.sh` (gitignored; copy from `.env.example`). Set `APPLE_SIGNING_IDENTITY` to a Developer ID Application identity and the Apple notarization credentials, and the shippable `.dmg` is signed, notarized, and stapled. Tauri notarizes the `.app`; `notarize-dmg.sh` submits the disk image, which is what Gatekeeper checks on download. `tauri.conf.json` keeps `signingIdentity: "-"`, so a machine without those variables still gets an ad-hoc build that runs locally. Leave unused keys commented — Tauri treats a set-but-empty `APPLE_ID` as "please notarize" and then fails.
 
 `app/.npmrc` refuses versions published in the last three days (`min-release-age`). That needs npm **11.10+**; Node 22 still ships 10, so `npm install -g npm@11` or use Node 24. To take a just-published patch anyway, add the package to `min-release-age-exclude` or pass `--min-release-age=0`.
 

@@ -448,6 +448,14 @@ button.icon-btn {
   text-align: left;
 }
 
+/* Without an isolate, `direction: rtl` reorders the path's leading neutrals:
+   `~/Desktop/sandbox` renders as `Desktop/sandbox/~`. The parent stays rtl so
+   the ellipsis lands on the left; the bdi keeps the characters in order. */
+.projectbar-path > bdi {
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+
 .projectbar-actions {
   display: flex;
   gap: 8px;

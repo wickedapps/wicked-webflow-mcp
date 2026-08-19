@@ -167,6 +167,22 @@ function github() {
     )
   }
 
+  // Tauri notarizes the .app; notarize-dmg.sh staples the wrapper. Refuse to
+  // ship a disk image Gatekeeper will still block on download.
+  if (process.platform === 'darwin') {
+    for (const dmg of dmgs) {
+      const staple = spawnSync('xcrun', ['stapler', 'validate', dmg], {
+        cwd: ROOT,
+        stdio: 'inherit',
+      })
+      if (staple.status !== 0) {
+        throw new Error(
+          `${relative(ROOT, dmg)} is not stapled. Re-run \`npm run app:build\` with Apple credentials in app/.env.`,
+        )
+      }
+    }
+  }
+
   const args = [
     'release',
     'create',

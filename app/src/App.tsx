@@ -1,11 +1,16 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useState, type ReactNode } from 'react'
 
 import { AddClient } from './AddClient'
 import { ConfirmRemove } from './ConfirmRemove'
-import { LoginTerminal } from './LoginTerminal'
 import { ProjectBar } from './ProjectBar'
 import * as projects from './project'
 import * as wwm from './wwm'
+
+// xterm is over half the bundle and is only needed once someone opens an
+// authorize sheet, so it rides in its own chunk off the local disk.
+const LoginTerminal = lazy(() =>
+  import('./LoginTerminal').then((m) => ({ default: m.LoginTerminal })),
+)
 
 type Tab = 'connections' | 'projects'
 
@@ -897,14 +902,16 @@ export default function App() {
       )}
 
       {login && (
-        <LoginTerminal
-          server={login.server}
-          label={login.label}
-          onExit={(code) => {
-            if (code === 0) void verifyServer(login.server)
-          }}
-          onClose={() => setLogin(null)}
-        />
+        <Suspense fallback={null}>
+          <LoginTerminal
+            server={login.server}
+            label={login.label}
+            onExit={(code) => {
+              if (code === 0) void verifyServer(login.server)
+            }}
+            onClose={() => setLogin(null)}
+          />
+        </Suspense>
       )}
     </div>
   )

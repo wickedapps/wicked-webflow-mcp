@@ -2,7 +2,15 @@
 
 **Keep every client's Webflow MCP connection authorized at once, and load only the ones each project needs.**
 
-A Claude Code plugin for agencies and freelancers running Webflow work across several clients.
+![Connections tab of Wicked Webflow MCP Manager: two clients, both connected, each listing the Webflow sites its grant reaches](/app/docs/connections.png)
+
+*Two clients, both authorized, neither one waiting on the other. Verify shows the sites each grant can actually reach.*
+
+Three surfaces, one implementation:
+
+- **[Desktop app](#desktop-app):** the front door. Authorize, verify and switch clients without touching a terminal. macOS, from [GitHub Releases](https://github.com/wickedapps/wicked-webflow-mcp/releases/latest).
+- **[Claude Code plugin](#claude-code-plugin):** `/wwm:*` commands inside a session, and the hook that applies each project's set.
+- **[`wwm` CLI](#cli):** one file, zero dependencies, on [npm](https://www.npmjs.com/package/wicked-webflow-mcp). What the other two shell out to.
 
 ---
 
@@ -24,9 +32,27 @@ wf-northgate    → https://mcp.webflow.com/mcp   (authorized for Northgate's si
 
 All three stay connected. None of them needs re-authorizing to use another.
 
-That is the whole mechanic. This plugin does the naming, the collision checking, and the scope verification.
+That is the whole mechanic. The app, the plugin, and the CLI do the naming, the collision checking, and the scope verification.
 
-## Install
+---
+
+## Desktop app
+
+[**Download for macOS (Apple silicon)**](https://github.com/wickedapps/wicked-webflow-mcp/releases/latest)
+
+Wicked Webflow MCP Manager authorizes each client once, shows what each grant actually reaches, and loads only the connections the current project needs — without pasting `claude mcp login` into a terminal.
+
+![Projects tab, with one client enabled for the current folder and another disabled](/app/docs/projects.png)
+
+*Enable only what this folder should load. The rest stay connected, just not in this project.*
+
+The `.dmg` includes `wwm`, so there is nothing to install first. You still need Claude Code **2.1.186+** and Node **22+** — the app shells out to `claude`, and the bundled `wwm` is a Node program rather than a compiled binary.
+
+Releases are signed with a Developer ID and notarized. Architecture and how to build from source are in [`app/README.md`](app/README.md).
+
+---
+
+## Claude Code plugin
 
 ```bash
 claude plugin marketplace add wickedapps/wicked-webflow-mcp
@@ -34,8 +60,6 @@ claude plugin install wwm@wicked-webflow-mcp
 ```
 
 Requires Claude Code **2.1.186+** and Node **22+**. Run `wwm doctor` to check.
-
-## Use
 
 From inside Claude Code:
 
@@ -49,20 +73,26 @@ From inside Claude Code:
 
 **Authorizing has one step Claude Code cannot do for you.** `claude mcp login` opens a browser and needs a real terminal; the agent's shell does not have one. So `/wwm:connect` registers the connection, briefs you on the consent screen, and hands you a `claude mcp login wf-<slug>` line to paste into your own terminal. That is the design, not a limitation being worked around — the one irreducibly human step stays with the human.
 
+The [desktop app](#desktop-app) is the other way through that step: it owns a pty, so it can run the login itself.
+
 A new connection is usable immediately — no restart needed. (Measured on Claude Code 2.1.223: a server added and authorized mid-session was callable from an already-running session.)
 
-### Using `wwm` directly from your shell
+---
 
-The plugin puts `wwm` on `PATH` **inside Claude Code sessions only**. If you would rather drive it from your own terminal — which is the nicer path for setting up several clients at once, since it does the whole connect-authorize-verify flow in one command:
+## CLI
+
+The plugin puts `wwm` on `PATH` **inside Claude Code sessions only**. Install it globally to drive it from your own terminal — the nicer path for setting up several clients at once, since one command does the whole connect-authorize-verify flow:
 
 ```bash
 npm install -g wicked-webflow-mcp
 ```
 
+Zero dependencies; that install puts the one file on your `PATH`. Requires Node **22+**. This is the only surface on npm — the plugin installs from the marketplace above, the app from GitHub Releases.
+
 Run `wwm` with no arguments and you get a dashboard and a menu:
 
 ```
-  wwm 0.6.1                                  ~/work/dino-site
+  wwm 0.6.2                                  ~/work/dino-site
 
   ●  wf-dino        Dino Studios       1 site · Dino                   2d ago
   ○  wf-stonesboots Stones & Boots     3 sites · S&B, S&B EU, +1       5d ago
@@ -102,8 +132,6 @@ Three of them open a picker when you leave the arguments off:
 
 **Interactive only means interactive.** Piped, scripted, `--json`, `--quiet`, `--yes`, or with no TTY, every command behaves exactly as it did before — bare `wwm` prints usage and exits 2, and bare `wwm verify` still means `--all`. Nothing automated can start hanging on a prompt. If your terminal renders the redrawing pickers badly, `WWM_NO_RAW=1` switches them to numbered lists with the same choices.
 
-Zero dependencies; that install puts the one file on your `PATH`. Requires Node **22+**.
-
 ---
 
 ## Per-project activation
@@ -140,7 +168,7 @@ This is the part worth reading slowly, because the pitch and the mechanism are n
 
 **A grant covers exactly the sites you tick.** Webflow's consent screen lists every site in every workspace you can reach, and it is multi-select. Tick one site and the connection sees one site; tick a client's five and it sees those five. Both are correct — plenty of clients have more than one site, and a grant covering a group is a normal thing to authorize, not a mistake. `wwm` reports what a connection reaches and leaves the judgment to you.
 
-**Webflow guarantees one thing: a single grant cannot span two workspaces.** That is enforced by Webflow's authorization server. Nothing you or this plugin can do will produce a cross-workspace grant. If each client sits in its own workspace, that happens to be exactly the boundary you want — and it holds whether or not anyone is paying attention.
+**Webflow guarantees one thing: a single grant cannot span two workspaces.** That is enforced by Webflow's authorization server. Nothing you or `wwm` can do will produce a cross-workspace grant. If each client sits in its own workspace, that is exactly the boundary you want — and it holds whether or not anyone is paying attention.
 
 **The click worth being careful about is the workspace row.** Each workspace name sits above its sites as its own checkbox, and one click there grants every site in it — including other clients'. It is one row from the site rows, there is no confirmation, and the result looks identical afterwards. That is the mis-tick `wwm verify` is good at catching: the site list comes back longer than the client you had in mind.
 
@@ -150,7 +178,7 @@ This is the part worth reading slowly, because the pitch and the mechanism are n
 
 **Scoping limits which sites, never what can be done to them.** Within an authorized site the grant covers Designer-API element creation, CMS writes, style and custom-code changes, and asset management. "Scoped to this client" does not mean read-only, restricted, or safe. It means a mistake is confined to that client's sites instead of every client you have.
 
-**This plugin never sees your credentials.** Every connection change is made by shelling out to the `claude` CLI. Tokens live in Claude Code's keychain storage; `wwm` reads connection names and health, and nothing else.
+**None of the three surfaces sees your credentials.** Every connection change is made by shelling out to the `claude` CLI. Tokens live in Claude Code's keychain storage; `wwm` reads connection names and health, and nothing else.
 
 **`remove` destroys the grant.** On Claude Code 2.1.223, removing a server invalidates its stored authorization everywhere, at any scope. There is no way to remove a connection and keep its token, which is why deactivating for one project is `wwm switch` and never `remove`.
 
@@ -185,6 +213,8 @@ npm run release:github      # attach the local .dmg to a GitHub Release tagged v
 `release:github` does not stamp or build. It refuses if the version files disagree, or if `npm run app:build` has not produced a `.dmg`.
 
 They live in the root `package.json`. Run them from the repo root — inside `app/`, npm resolves `app/package.json` instead, which owns the desktop app's own scripts. It forwards these up so either directory works.
+
+The npm package publishes only `bin/wwm`. The app is not on npm; it ships from [GitHub Releases](https://github.com/wickedapps/wicked-webflow-mcp/releases).
 
 ---
 
