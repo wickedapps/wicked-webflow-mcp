@@ -10,7 +10,7 @@
 // fixtures — see test/fixtures/. Everything that touches the network, the
 // filesystem, or a subprocess lives below the PARSERS section.
 
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -25,7 +25,7 @@ export const PLUGIN_ID = 'wicked-webflow-mcp'
 // npm ships only this file, so the version cannot be read from package.json.
 // Bump in lockstep with package.json, plugin.json, and marketplace.json.
 // `node scripts/release.mjs stamp <version>` does all of them at once.
-export const VERSION = '0.6.1'
+export const VERSION = '0.6.2'
 
 /**
  * The shape of `--json` output, versioned independently of VERSION.
@@ -954,15 +954,39 @@ function ttyWidth() {
   return Number.isInteger(w) && w > 20 ? w : 80
 }
 
-/** Read one keypress. The buffer is big enough to hold a whole escape sequence. */
-function readKey(fd) {
+/**
+ * Sleep synchronously, without the event loop.
+ *
+ * The tty is non-blocking, so `readKey` below spins on EAGAIN — measured at
+ * ~360k iterations in 700ms, which is a pegged core for as long as a menu is on
+ * screen. Parking the thread between polls costs at most `ms` of added latency
+ * on a keypress and takes the idle cost to nothing.
+ */
+const IDLE = new Int32Array(new SharedArrayBuffer(4))
+function idleSleep(ms) {
+  try { Atomics.wait(IDLE, 0, 0, ms) } catch { /* not permitted here; spin instead */ }
+}
+
+/**
+ * Read one keypress. The buffer is big enough to hold a whole escape sequence.
+ *
+ * `onIdle` runs on each turn of the EAGAIN spin, which is the only place this
+ * synchronous interactive kernel has to offer anyone. It is what lets the
+ * dashboard animate a spinner and pick up a background `mcp list` while still
+ * blocking on a key — see `pick`.
+ */
+function readKey(fd, onIdle = null) {
   const buf = Buffer.alloc(16)
   for (;;) {
     let n
     try {
       n = readSync(fd, buf, 0, buf.length, null)
     } catch (e) {
-      if (e.code === 'EAGAIN') continue // nothing typed yet
+      if (e.code === 'EAGAIN') { // nothing typed yet
+        if (onIdle) onIdle()
+        else idleSleep(8)
+        continue
+      }
       if (e.code === 'EOF') return { name: 'eof' }
       throw e
     }
@@ -979,36 +1003,76 @@ function readKey(fd) {
  * that was escaped mean opposite things, and `switch --none` is exactly the
  * case where treating them the same would deactivate everything by accident.
  */
-function pick({ title = null, items, multi = false, checked = null, cursor = 0, hotkeys = [], footer = null, quitLabel = 'cancel' }) {
+function pick({ title = null, items, multi = false, checked = null, cursor = 0, hotkeys = [], footer = null, quitLabel = 'cancel', header = null, poll = null }) {
   if (title) { OUT('\n'); OUT(`  ${useColor() ? ANSI.bold(title) : title}\n`); OUT('\n') }
 
   const raw = openRawTty()
-  if (!raw) return pickNumbered({ items, multi, checked, footer })
+  if (!raw) {
+    if (header) OUT(header(0).join('\n') + '\n')
+    return pickNumbered({ items, multi, checked, footer })
+  }
 
   let state = initPicker({ items, multi, checked, cursor, hotkeys, quitLabel })
   const opts = () => ({ width: ttyWidth(), footer, color: useColor() })
   let painted = 0
+  let tick = 0
+
+  // Repainting works by walking the cursor back up over what we last wrote, so
+  // the whole block has to still be on screen. A dashboard plus a menu can
+  // outgrow a short terminal, and once it scrolls the cursor-up lands in the
+  // wrong place and starts eating the scrollback. So the header only joins the
+  // repainted region when it demonstrably fits; otherwise it is printed once,
+  // above the region, and only the menu redraws under it.
+  // Same shape of guard as ttyWidth: a terminal that reports an implausible
+  // height (0 under some ptys, unset when stderr is not the tty) must fall back
+  // to an assumption, not disable the header by arithmetic accident.
+  const reported = process.stderr.rows
+  const termRows = Number.isInteger(reported) && reported > 4 ? reported : 24
+  const headerFits = header ? header(0).length + renderPicker(state, opts()).length + 1 < termRows : false
+  if (header && !headerFits) OUT(header(0).join('\n') + '\n')
 
   const paint = () => {
     if (painted) OUT(`\x1b[${painted}A`)
     OUT('\x1b[0J')
-    const lines = renderPicker(state, opts())
+    const lines = [...(header && headerFits ? header(tick) : []), ...renderPicker(state, opts())]
     OUT(lines.join('\n') + '\n')
     painted = lines.length
+  }
+
+  // Poll the background work between keystrokes, but on a clock of its own:
+  // the EAGAIN spin turns far too fast to repaint on, and a spinner that
+  // advances 360k times a second is a blur, not a progress signal.
+  let lastPoll = Date.now()
+  const onIdle = () => {
+    idleSleep(8)
+    if (!poll) return
+    const now = Date.now()
+    if (now - lastPoll < 90) return
+    lastPoll = now
+    if (!poll()) return
+    tick++
+    paint()
   }
 
   try {
     OUT(HIDE_CURSOR)
     paint()
     for (;;) {
-      state = applyKey(state, readKey(raw.fd))
+      state = applyKey(state, readKey(raw.fd, poll ? onIdle : null))
       if (state.done || state.cancelled || state.action) break
       paint()
     }
     // Erase the picker. What was chosen gets reported by the caller in one
     // line; leaving a stale checkbox list above it just makes the scrollback
-    // harder to read.
-    if (painted) { OUT(`\x1b[${painted}A`); OUT('\x1b[0J') }
+    // harder to read. The header is put back: it was inside the repainted
+    // region only so its health column could resolve, and it is context for
+    // whatever the chosen action prints next — exactly as when it was printed
+    // above the region.
+    if (painted) {
+      OUT(`\x1b[${painted}A`)
+      OUT('\x1b[0J')
+      if (header && headerFits) OUT(header(tick).join('\n') + '\n')
+    }
   } finally {
     restoreTty()
   }
@@ -1419,12 +1483,19 @@ function invalidateListCache() {
   try { unlinkSync(cachePath()) } catch { /* nothing cached, or already gone */ }
 }
 
+/** The cache if it is young enough to trust, else null. Never calls out. */
+function peekListCache(staleSeconds = 60) {
+  try {
+    const cached = JSON.parse(readFileSync(cachePath(), 'utf8'))
+    if (Date.now() - cached.at < staleSeconds * 1000) return { ...cached.data, cached: true }
+  } catch { /* nothing cached, or unreadable */ }
+  return null
+}
+
 function listServers({ refresh = false, staleSeconds = 60 } = {}) {
   if (!refresh) {
-    try {
-      const cached = JSON.parse(readFileSync(cachePath(), 'utf8'))
-      if (Date.now() - cached.at < staleSeconds * 1000) return { ...cached.data, cached: true }
-    } catch { /* fall through to a live call */ }
+    const cached = peekListCache(staleSeconds)
+    if (cached) return cached
   }
 
   const res = runClaude(['mcp', 'list'], { readOnly: true })
@@ -1443,6 +1514,90 @@ function listServers({ refresh = false, staleSeconds = 60 } = {}) {
 
   try { writeFileSync(cachePath(), JSON.stringify({ at: Date.now(), data: parsed })) } catch { /* cache is optional */ }
   return { ...parsed, cached: false }
+}
+
+/**
+ * The configured server set, with no health, read straight from ~/.claude.json.
+ *
+ * `claude mcp list` is the only source of health and it costs 2-4s, because it
+ * opens a real connection to every configured server — including the ones wwm
+ * does not own and will never show. Every other column of the dashboard comes
+ * from somewhere free: label and sites from state.json, active from the
+ * `disabledMcpServers` list in this same file. So the names alone are enough to
+ * draw the whole screen and build the menu, and health can arrive afterwards
+ * into a column already sized for it.
+ *
+ * This reads the file `disabledServersFor` already reads, so it adds no new
+ * dependency on Claude Code's config shape. Returns null — not an empty list —
+ * when the file is missing or unreadable, because "no servers" and "could not
+ * tell" must not render the same; the caller falls back to the blocking path.
+ */
+function serversFromConfig() {
+  const cfg = readClaudeJson()
+  const map = cfg?.mcpServers
+  if (!map || typeof map !== 'object') return null
+
+  const servers = Object.entries(map).map(([name, spec]) => ({
+    name,
+    target: spec?.url || [spec?.command, ...(spec?.args ?? [])].filter(Boolean).join(' '),
+    health: 'checking',
+    statusText: null,
+    raw: null,
+  }))
+  return { servers, unparsed: [], ok: true, cached: false, pending: true }
+}
+
+/** Shell-quote for the one `sh -c` we spawn. */
+function shq(s) { return `'${String(s).replace(/'/g, `'\\''`)}'` }
+
+/**
+ * Start `claude mcp list` in the background, and hand back a synchronous poll.
+ *
+ * The picker's read loop is a synchronous EAGAIN spin (see `readKey`), so the
+ * event loop never turns while a menu is on screen — an async child's 'data'
+ * handler would simply never fire. The output therefore has to land somewhere a
+ * synchronous poll can see, which means a file.
+ *
+ * The child writes a temp file and renames it. The rename is the completion
+ * signal, and it is what makes a half-written file unobservable: `poll` can run
+ * hundreds of times while the child is mid-write and never see a truncated
+ * list. Same reason `writeDisabledFor` writes through a rename.
+ *
+ * Returns null if there is nothing to poll, in which case the caller must fall
+ * back to fetching health synchronously.
+ */
+function startListFetch() {
+  const bin = claudeBin()
+  if (!bin) return null
+
+  const dir = stateDir()
+  const partial = join(dir, 'mcp-list.partial')
+  const done = join(dir, 'mcp-list.done')
+  for (const p of [partial, done]) { try { unlinkSync(p) } catch { /* nothing there */ } }
+
+  let child
+  try {
+    child = spawn('/bin/sh', ['-c', `${shq(bin)} mcp list >${shq(partial)} 2>&1; mv ${shq(partial)} ${shq(done)}`], {
+      detached: true,
+      stdio: 'ignore',
+    })
+  } catch { return null }
+  child.unref()
+
+  return () => {
+    let text
+    try { text = readFileSync(done, 'utf8') } catch { return null } // still running
+    try { unlinkSync(done) } catch { /* best effort */ }
+
+    const parsed = parseMcpList(text)
+    // A parse failure is loud in `status` and `doctor`, which call the blocking
+    // path and can afford to abort. Here the user is already mid-interaction,
+    // so an unreadable list costs them the health column and nothing else.
+    if (!parsed.ok) return { servers: [], unparsed: parsed.unparsed, ok: false, cached: false }
+
+    try { writeFileSync(cachePath(), JSON.stringify({ at: Date.now(), data: parsed })) } catch { /* cache is optional */ }
+    return { ...parsed, cached: false }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1917,9 +2072,9 @@ function rollbackConnect(name) {
  * can never disagree, and the agent gets the same picture in one call rather
  * than three.
  */
-function gatherStatus({ refresh = false, staleSeconds = 60, dir = resolvedCwd() } = {}) {
+function gatherStatus({ refresh = false, staleSeconds = 60, dir = resolvedCwd(), listed = null } = {}) {
   const state = loadState()
-  const listed = listServers({ refresh, staleSeconds })
+  listed = listed ?? listServers({ refresh, staleSeconds })
 
   const disabled = new Set(disabledServersFor(dir))
   const owned = listed.servers.filter((s) => s.name.startsWith(prefix()))
@@ -1960,6 +2115,31 @@ function gatherStatus({ refresh = false, staleSeconds = 60, dir = resolvedCwd() 
   }
 
   return { state, listed, rows, activation, dir }
+}
+
+/**
+ * Fold a late-arriving `mcp list` into a snapshot already on screen.
+ *
+ * Only `health` and `statusText` are touched, and no row is added or removed.
+ * That is deliberate rather than lazy: the menu is built from this snapshot and
+ * the user's cursor is sitting in it, so a row appearing or vanishing under the
+ * keyboard would move the selection between the keypress and the action. Every
+ * other field came from state.json and ~/.claude.json, which the slow call has
+ * nothing to say about anyway, so there is nothing else it could correct.
+ *
+ * A server in the config that the list does not mention reads as `unknown`, not
+ * as connected — the list is the authority on health, and silence from it is
+ * not good news.
+ */
+function applyHealth(snap, listed) {
+  const byName = new Map(listed.servers.map((s) => [s.name, s]))
+  for (const r of snap.rows) {
+    const s = byName.get(r.server)
+    r.health = s ? s.health : 'unknown'
+    r.statusText = s ? s.statusText : null
+  }
+  snap.listed = listed
+  return snap
 }
 
 function cmdStatus(args) {
@@ -2022,17 +2202,21 @@ function cmdStatus(args) {
  * about to do something — hence no column headings, and the active/inactive
  * distinction carried by a symbol rather than a word.
  */
-function renderDashboard({ rows, activation, dir }) {
+const SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+
+function dashboardLines({ rows, activation, dir }, { tick = 0 } = {}) {
   const c = useColor() ? ANSI : { dim: (s) => s, bold: (s) => s, cyan: (s) => s }
   const width = ttyWidth()
+  const out = []
 
-  OUT('\n')
-  OUT(`  ${c.bold(`wwm ${VERSION}`)}  ${c.dim(clip(dir, Math.max(20, width - 20)))}\n`)
-  OUT('\n')
+  out.push('')
+  out.push(`  ${c.bold(`wwm ${VERSION}`)}  ${c.dim(clip(dir, Math.max(20, width - 20)))}`)
+  out.push('')
 
   if (rows.length === 0) {
-    OUT(`  ${c.dim('No connections yet.')}\n\n`)
-    return
+    out.push(`  ${c.dim('No connections yet.')}`)
+    out.push('')
+    return out
   }
 
   const nameW = rows.reduce((m, r) => Math.max(m, r.server.length), 0)
@@ -2042,26 +2226,34 @@ function renderDashboard({ rows, activation, dir }) {
     const dot = r.active ? c.cyan(sym.dot) : c.dim(sym.ring)
     const reach = describeVerification(r)
     const age = r.sites === null ? '' : relativeTime(r.verifiedAt)
-    const health = r.health === 'connected' ? '' : ` ${sym.warn} ${r.health.replace(/_/g, ' ')}`
+    // `checking` is the one health that is neither good nor bad news, so it
+    // gets the spinner and the dim treatment rather than the warning glyph —
+    // an unresolved column must not read as a problem for the seconds it takes
+    // to resolve.
+    const health = r.health === 'connected' ? ''
+      : r.health === 'checking' ? ` ${c.dim(`${SPIN[tick % SPIN.length]} checking`)}`
+      : ` ${sym.warn} ${r.health.replace(/_/g, ' ')}`
     const body = `${pad(r.server, nameW)}  ${pad(clip(String(r.label), labelW), labelW)}  ${reach}${health}`
-    OUT(`  ${dot}  ${clip(body, Math.max(20, width - 8 - age.length))}${age ? `  ${c.dim(age)}` : ''}\n`)
+    out.push(`  ${dot}  ${clip(body, Math.max(20, width - 8 - age.length))}${age ? `  ${c.dim(age)}` : ''}`)
   }
 
   const activeCount = rows.filter((r) => r.active).length
-  OUT('\n')
-  OUT(`  ${c.dim(`${activeCount} of ${rows.length} active here · from ${activation.source}`)}\n`)
+  out.push('')
+  out.push(`  ${c.dim(`${activeCount} of ${rows.length} active here · from ${activation.source}`)}`)
 
   // Stated, not warned about. "No wf- connection here" does not mean "no
   // Webflow here", and that is worth knowing — but it is not a problem, and
   // it gets no glyph and no menu row.
   if (activeCount === 0 && !activation.connectorsSuppressed) {
-    OUT(`  ${c.dim(`Claude Code's own Webflow connector can load here.`)}\n`)
+    out.push(`  ${c.dim(`Claude Code's own Webflow connector can load here.`)}`)
   }
 
   for (const p of dashboardProblems({ rows, activation })) {
-    OUT(`\n  ${sym.warn} ${p.text}\n`)
+    out.push('')
+    out.push(`  ${sym.warn} ${p.text}`)
   }
-  OUT('\n')
+  out.push('')
+  return out
 }
 
 /**
@@ -2072,18 +2264,59 @@ function renderDashboard({ rows, activation, dir }) {
  * only in here. A `Fail` from a flow is rendered and swallowed — one bad answer
  * should cost you a menu, not the session.
  */
+/**
+ * A snapshot to draw right now, plus whatever is still on its way.
+ *
+ * The order of preference is the order of cost. A young cache is free and
+ * accurate, so it wins. Otherwise the names come out of ~/.claude.json for
+ * nothing and health is left to catch up in the background. Only if that file
+ * cannot be read, or the fetch cannot be started, do we fall back to blocking —
+ * a slow dashboard being much better than none.
+ */
+function menuSnapshot({ refresh }) {
+  if (!refresh) {
+    const cached = peekListCache()
+    if (cached) return { snap: gatherStatus({ listed: cached }), pending: null }
+  }
+
+  const config = serversFromConfig()
+  const pending = config ? startListFetch() : null
+  if (!pending) return { snap: gatherStatus({ refresh: true }), pending: null }
+
+  return { snap: gatherStatus({ listed: config }), pending }
+}
+
 function cmdMenu() {
   requirePreflight()
   let refresh = false
 
   for (;;) {
-    const snap = gatherStatus({ refresh })
+    const { snap, pending: started } = menuSnapshot({ refresh })
     refresh = false
-    renderDashboard(snap)
+    let pending = started
 
+    // Neither of these reads health — checked, and the reason it matters is
+    // that they are computed before health exists. The menu the user is
+    // pointing at is therefore final from the first frame, and cannot
+    // reshuffle under the cursor when the list lands.
     const problems = dashboardProblems(snap)
     const items = menuItems({ rows: snap.rows, problems })
-    const chosen = pick({ items, hotkeys: ['r'], quitLabel: 'quit' })
+
+    const header = (tick) => dashboardLines(snap, { tick })
+    const poll = started
+      ? () => {
+        if (!pending) return false // already landed; nothing left to animate
+        const got = pending()
+        if (!got) return true // still running — repaint to advance the spinner
+        pending = null
+        // An unparseable list leaves health unknown rather than taking the
+        // menu down; `wwm doctor` is where that gets diagnosed properly.
+        applyHealth(snap, got.ok ? got : { servers: [] })
+        return true // one last repaint, now with real health
+      }
+      : null
+
+    const chosen = pick({ items, hotkeys: ['r'], quitLabel: 'quit', header, poll })
 
     if (chosen.action === 'r') { refresh = true; continue }
     if (chosen.cancelled || chosen.indexes.length === 0) return EXIT.OK
