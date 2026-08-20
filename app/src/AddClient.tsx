@@ -15,7 +15,7 @@ export function AddClient({ taken, busy, onCancel, onSubmit }: Props) {
 
   // The prefix is configurable (CLAUDE_PLUGIN_OPTION_PREFIX), and `status`
   // does not report it, so infer it from what already exists. This is only the
-  // preview string — the CLI names the server, and its answer is what lands.
+  // preview string. The CLI names the server, and its answer is what lands.
   const pfx = taken[0]?.match(/^[a-z0-9]+-/)?.[0] ?? 'wf-'
 
   const slug = slugify(name)

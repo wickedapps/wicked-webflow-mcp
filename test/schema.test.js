@@ -1,12 +1,12 @@
 // The `--json` contract.
 //
-// bin/wwm's JSON output used to be incidental — whatever an emitJson call site
+// bin/wwm's JSON output used to be incidental, whatever an emitJson call site
 // happened to pass. It now has a consumer that ships separately (app/, the
 // desktop front end) and cannot be fixed by editing this repo, so the shapes
 // are pinned here.
 //
 // Every test asserts the EXACT key set, not a subset. Adding a field is not a
-// breaking change for consumers, but it must still fail here: the point is
+// breaking change for consumers, but it must still fail here. The point is
 // that no field appears or disappears without someone deciding whether
 // SCHEMA_VERSION should move. When one of these fails, either revert the
 // output change or update the pin AND bump SCHEMA_VERSION if the change is
@@ -193,7 +193,7 @@ test('status', (t) => {
     'status.servers[]',
   )
 
-  // Meanings the app depends on, not just the names.
+  // The values the app reads, not only whether the keys exist.
   assert.equal(row.sites, null, 'never verified must be null — not [], which reads as "verified, no sites"')
   assert.equal(row.verifiedAt, null)
   assert.equal(row.verifyFailed, false)
@@ -236,7 +236,7 @@ test('connect, which can never authorize without a TTY', (t) => {
     ['schemaVersion', 'ok', 'server', 'label', 'scope', 'loginCommand', 'authorized'],
     'connect',
   )
-  // The whole reason app/src-tauri/src/pty.rs exists: the CLI hands back a
+  // The whole reason app/src-tauri/src/pty.rs exists. The CLI hands back a
   // command instead of running it. If this ever starts coming back authorized,
   // the app's login sheet is dead code and should go.
   assert.equal(out.authorized, false)

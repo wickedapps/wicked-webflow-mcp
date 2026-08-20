@@ -1,6 +1,6 @@
 [package]
 name = "wicked-webflow-app"
-version = "0.6.2"
+version = "0.6.3"
 description = "Desktop front end for the wwm CLI"
 authors = ["Wicked Apps"]
 license = "ISC"
@@ -19,8 +19,8 @@ tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The reason this app exists. `claude mcp login` refuses to start its browser
-# flow without a controlling terminal, so the GUI has to supply a real pty —
-# pipes are not enough. See bin/wwm:1726.
+# flow without a controlling terminal, so the GUI has to supply a real pty.
+# Pipes are not enough. See bin/wwm:1726.
 portable-pty = "0.9"
 # The native folder picker. Which directory you are managing is the whole
 # question `switch` answers, and typing a path is not a desktop answer to it.

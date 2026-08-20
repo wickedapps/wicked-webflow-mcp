@@ -2,7 +2,7 @@
 # Stands in for `cargo` during `tauri dev` (build.runner in tauri.conf.json).
 #
 # macOS names the Dock tile of an *unbundled* binary after the executable's
-# filename, and nothing else — not NSProcessInfo, not an embedded __info_plist,
+# filename, and nothing else. Not NSProcessInfo, not an embedded __info_plist,
 # not tauri's mainBinaryName. Cargo refuses spaces in a target name, so
 # `cargo run` can only ever launch `wicked-webflow-app`. So build the way cargo
 # would, then launch the binary under a name that matches the .app bundle.

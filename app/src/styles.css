@@ -444,7 +444,7 @@ button.icon-btn {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  direction: rtl; /* keep the tail — the folder name — when it clips */
+  direction: rtl; /* keep the tail, the folder name, when it clips */
   text-align: left;
 }
 
@@ -594,14 +594,16 @@ input[type='text'],
   background: rgb(24 24 24 / 28%);
   display: grid;
   place-items: center;
-  padding: 24px;
+  /* Fixed padding is a large share of a small window, and it comes straight
+     off the card's width budget. */
+  padding: clamp(10px, 3vw, 24px);
 }
 
 .sheet-card {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  width: min(860px, 100%);
+  width: min(720px, 100%);
   max-height: 100%;
   padding: 18px;
   display: flex;
@@ -619,9 +621,31 @@ input[type='text'],
   margin: 0;
 }
 
+/* The login card is the one sheet that can outgrow a small window, because it
+   carries a terminal. max-height alone does not help. A flex column overflows
+   its own max-height unless the children can give ground. So the prose and the
+   terminal both shrink, and the footer never does. The buttons stay reachable
+   at any window size. */
+.sheet-card.login {
+  overflow: hidden;
+}
+
+.sheet-card.login > header {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.sheet-card.login > footer {
+  flex-shrink: 0;
+}
+
 .term {
-  height: 340px;
-  background: #181818;
+  /* A basis, not a fixed height. Flex shrinks it when the window is short,
+     and the ResizeObserver in LoginTerminal refits xterm and the pty to match. */
+  flex: 1 1 auto;
+  height: min(320px, 40vh);
+  min-height: 120px;
+  background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--control-radius);
   padding: 8px;

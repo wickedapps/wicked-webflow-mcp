@@ -1,5 +1,5 @@
 //! Shell out to `bin/wwm --json`. Do not reimplement state.json / .claude.json
-//! handling here — two writers to those files would drift, and .claude.json's
+//! handling here. Two writers to those files would drift, and .claude.json's
 //! schema belongs to Claude Code.
 
 use std::path::PathBuf;
@@ -16,8 +16,8 @@ pub struct Located {
     pub source: String,
 }
 
-/// A GUI launched from Finder or the Dock inherits a minimal PATH — roughly
-/// `/usr/bin:/bin:/usr/sbin:/sbin` — not the one from .zshrc. Anyone running
+/// A GUI launched from Finder or the Dock inherits a minimal PATH, roughly
+/// `/usr/bin:/bin:/usr/sbin:/sbin`, not the one from .zshrc. Anyone running
 /// node through nvm (or Homebrew on Apple silicon) has `wwm` somewhere that
 /// PATH cannot see, and `wwm` in turn shells out to `claude`, which has the
 /// same problem one level down. So we ask the login shell once and hand the
@@ -132,7 +132,7 @@ fn wwm_extras() -> Vec<PathBuf> {
 
 /// Build the command that runs the located CLI.
 ///
-/// An installed copy is executed directly, the way it always has been: npm
+/// An installed copy is executed directly, the way it always has been. npm
 /// wrote a `.cmd` shim on Windows, and everywhere else the shebang does the
 /// work. A *bundled* copy has neither. It is a plain file that Tauri copied
 /// into a read-only app bundle, so the executable bit may not have survived the
@@ -140,7 +140,7 @@ fn wwm_extras() -> Vec<PathBuf> {
 /// `node` explicitly.
 ///
 /// This is why Node stays a real prerequisite even once the CLI ships inside
-/// the app: `bin/wwm` is a Node program, and bundling it removes the install
+/// the app. `bin/wwm` is a Node program, and bundling it removes the install
 /// step, not the runtime.
 fn cli_command(bin: &Located) -> Result<Command, String> {
     if bin.source != "bundled" {
@@ -210,11 +210,11 @@ pub fn locate(app: &AppHandle) -> Result<Option<Located>, String> {
 
 #[derive(Serialize, Debug)]
 pub struct Output {
-    /// The CLI's exit code. Non-zero is meaningful, not merely failure —
-    /// see the EXIT map in bin/wwm (2 usage, 3 preflight, 4 collision,
-    /// 6 verify failed, 7 parse).
+    /// The CLI's exit code. Non-zero is a real answer, not only a crash.
+    /// See the EXIT map in bin/wwm: 2 usage, 3 preflight, 4 collision,
+    /// 6 verify failed, 7 parse.
     pub code: i32,
-    /// Parsed stdout. Present even on failure: every error path emits
+    /// Parsed stdout. Present even on failure. Every error path emits
     /// `{ok: false, error, detail, exitCode}` under --json.
     pub json: Option<serde_json::Value>,
     /// Human-readable stderr, for when `json` is missing.
@@ -223,7 +223,7 @@ pub struct Output {
 
 /// Run `wwm <args> --json` in `cwd`.
 ///
-/// Commands run *in* the project directory: `--project` exists only on
+/// Commands run *in* the project directory. `--project` exists only on
 /// `switch` and `activate`, so a flag would be ignored by `status`.
 /// Wrapped in `spawn_blocking` because `claude mcp list` would otherwise
 /// freeze the UI thread.
@@ -343,7 +343,7 @@ fn npm_bin() -> &'static str {
 /// `npm install -g wicked-webflow-mcp`, using the same login-shell PATH as
 /// every other child so nvm / Homebrew node is visible from a Dock launch.
 ///
-/// Refused when `WWM_BIN` is set: that pin is deliberate, and a global install
+/// Refused when `WWM_BIN` is set. That pin is deliberate, and a global install
 /// would not be what the app runs next.
 fn run_upgrade(app: &AppHandle) -> Result<UpgradeOutput, String> {
     if std::env::var_os("WWM_BIN").is_some() {
@@ -354,7 +354,7 @@ fn run_upgrade(app: &AppHandle) -> Result<UpgradeOutput, String> {
         );
     }
 
-    // Same reasoning as the WWM_BIN guard: a global install would not be what
+    // Same reasoning as the WWM_BIN guard. A global install would not be what
     // the app runs next, so doing one would report success and change nothing.
     if let Ok(Some(bin)) = locate(app) {
         if bin.source == "bundled" {

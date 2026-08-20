@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// wwm — manage per-client Webflow MCP connections for Claude Code.
+// wwm manages per-client Webflow MCP connections for Claude Code.
 //
 // Single file, zero runtime dependencies. Every connection mutation goes
 // through the `claude` CLI; we never see, store, or transit a Webflow
@@ -7,7 +7,7 @@
 //
 // This file is both the CLI and the module the tests import. Parsers are
 // pure functions with no I/O so they can be exercised against recorded
-// fixtures — see test/fixtures/. Everything that touches the network, the
+// fixtures. See test/fixtures/. Everything that touches the network, the
 // filesystem, or a subprocess lives below the PARSERS section.
 
 import { spawn, spawnSync } from 'node:child_process'
@@ -25,14 +25,14 @@ export const PLUGIN_ID = 'wicked-webflow-mcp'
 // npm ships only this file, so the version cannot be read from package.json.
 // Bump in lockstep with package.json, plugin.json, and marketplace.json.
 // `node scripts/release.mjs stamp <version>` does all of them at once.
-export const VERSION = '0.6.2'
+export const VERSION = '0.6.3'
 
 /**
  * The shape of `--json` output, versioned independently of VERSION.
  *
- * Every payload carries this as its first key. Consumers that are not this
- * repo — the desktop app, anyone scripting against `wwm` — read it and refuse
- * to guess when it is a number they do not know.
+ * Every payload carries this as its first key. The desktop app and anyone
+ * scripting against `wwm` read it and refuse to guess when it is a number
+ * they do not know.
  *
  * Bump ONLY on a breaking change: a field removed, renamed, retyped, or given
  * a new meaning. Adding a field is not breaking; consumers must ignore keys
@@ -48,7 +48,7 @@ export const EXIT = {
   USAGE: 2,
   PREFLIGHT: 3,
   COLLISION: 4,
-  // 5 was OVERSCOPED — retired in 0.4.0. A grant covering several sites is a
+  // 5 was OVERSCOPED. Retired in 0.4.0. A grant covering several sites is a
   // normal authorization, not a failure, so nothing returns it any more. The
   // number stays burned rather than reused, so an old script reading exit 5 as
   // "over-scoped" never gets a new meaning silently.
@@ -57,7 +57,7 @@ export const EXIT = {
 }
 
 // ---------------------------------------------------------------------------
-// PARSERS — pure, fixture-tested. No I/O in this section.
+// PARSERS. Pure, fixture-tested. No I/O in this section.
 //
 // `claude mcp list` and `claude mcp get` have no --json as of 2.1.223, so we
 // parse human-readable output from a CLI that ships several times a week.
@@ -74,7 +74,7 @@ const HEALTH_PATTERNS = [
 
 /**
  * Map the status half of a list line ("✔ Connected") to a stable key.
- * Returns null when unrecognised — callers must treat that as a parse
+ * Returns null when unrecognised. Callers must treat that as a parse
  * failure, never as a default.
  */
 export function parseHealth(statusText) {
@@ -89,7 +89,7 @@ export function parseHealth(statusText) {
 /**
  * Parse `claude mcp list`.
  *
- * Real 2.1.223 output — note there is NO "(HTTP)" transport marker:
+ * Real 2.1.223 output. Note there is NO "(HTTP)" transport marker:
  *
  *   Checking MCP server health…
  *
@@ -100,7 +100,7 @@ export function parseHealth(statusText) {
  * Two shapes that break naive parsing, both present above:
  *   - names contain spaces and dots ("claude.ai some.tool")
  *   - stdio targets contain flags, so " - " appears more than once
- * Hence: name is everything before the FIRST ": ", status is everything
+ * So name is everything before the FIRST ": ", status is everything
  * after the LAST " - ".
  */
 export function parseMcpList(text) {
@@ -173,12 +173,12 @@ export function parseMcpGet(text) {
 /**
  * A tool_result larger than ~60KB is replaced in the transcript by a wrapper
  * naming a file on disk plus a 2KB preview. The preview is truncated JSON, so
- * it must never be parsed as the payload — return the path and let the caller
+ * it must never be parsed as the payload. Return the path and let the caller
  * decide whether it can read it.
  */
 export function parsePersistedOutput(text) {
   if (typeof text !== 'string' || !text.includes('<persisted-output>')) return null
-  // Capture to end of line, not to the first space: the path runs through the
+  // Capture to end of line, not to the first space. The path runs through the
   // user's home directory and plenty of people have a space in a folder name.
   const m = /Full output saved to:[ \t]*(.+?)[ \t]*$/m.exec(text)
   return { path: m ? m[1] : null }
@@ -266,7 +266,7 @@ export function parseVerifyTranscript(text, { readFile = null } = {}) {
           let contents
           try { contents = readFile(persisted.path) } catch { persistedUnreadable = persisted.path; continue }
           // The persisted file holds the tool_result content verbatim, which
-          // is normally the block array rather than the payload itself — so
+          // is normally the block array rather than the payload itself, so
           // unwrap it the same way before looking for sites.
           let fromFile = sitesFromText(contents)
           if (!fromFile) {
@@ -295,7 +295,7 @@ export function parseVerifyTranscript(text, { readFile = null } = {}) {
       hasMore: payload.hasMore,
       workspaceIds: [...new Set(payload.sites.map((s) => s.workspaceId).filter(Boolean))],
       // A fact, not a verdict. Webflow's consent screen is multi-select on
-      // purpose: authorizing a client's five sites in one grant is a normal
+      // purpose. Authorizing a client's five sites in one grant is a normal
       // thing to do, not a mistake to flag. What verify reports is what the
       // connection reaches; whether that matches intent is the user's call.
       singleSite: payload.total === 1 && !payload.hasMore,
@@ -354,7 +354,7 @@ export function validateSlug(slug) {
 // --- activation (pure half) -------------------------------------------------
 //
 // There is no CLI for per-project enable/disable, and `disabledMcpServers` is
-// in no settings schema — its only reader is ~/.claude.json -> projects[<cwd>].
+// in no settings schema. Its only reader is ~/.claude.json -> projects[<cwd>].
 // So activation is a surgical denylist merge, and these functions are the part
 // that decides what that list should contain.
 
@@ -364,7 +364,7 @@ export const WICKED_FILE = '.wicked-webflow'
  * Parse a `.wicked-webflow` file: one connection per line, `#` comments,
  * blank lines ignored. Slugs and full server names are both accepted.
  *
- * A file that exists but lists nothing means "no Webflow connections here" —
+ * A file that exists but lists nothing means "no Webflow connections here",
  * NOT "all of them". The file is a deliberate statement by whoever committed
  * it; falling back to all would quietly invert their intent.
  */
@@ -410,9 +410,9 @@ export function resolveActiveSet({ owned, fileEntries = null, stateActive = null
 /**
  * Merge our intent into whatever is already in `disabledMcpServers`.
  *
- * The array is shared with the user's own `/mcp` toggles — someone may have
+ * The array is shared with the user's own `/mcp` toggles. Someone may have
  * disabled `pencil` by hand, and wiping that would be us breaking a setting we
- * were never asked to touch. So: only names we own are ever added or removed,
+ * were never asked to touch. Only names we own are ever added or removed,
  * every other entry keeps its place, and the result is stable under repeated
  * application (the SessionStart hook runs this on every single session start).
  */
@@ -450,10 +450,10 @@ export function sameList(a, b) {
  * immediately after a `remove` still lists the connection we just destroyed.
  *
  * Deciding this from the argv, in one place, rather than remembering to
- * invalidate at each call site — the bug was a missing invalidation, and more
- * call sites is more chances to miss it again. login/logout count: they do not
- * add or remove a name, but they move its health between Connected and Needs
- * authentication, which is a column on the same screen.
+ * invalidate at each call site. The bug was a missing invalidation, and more
+ * call sites is more chances to miss it again. login and logout count too.
+ * They do not add or remove a name, but they move its health between Connected
+ * and Needs authentication, which is a column on the same screen.
  */
 export function mutatesServerList(args) {
   return Array.isArray(args) && args[0] === 'mcp' && ['add', 'remove', 'login', 'logout'].includes(args[1])
@@ -465,7 +465,7 @@ export function mutatesServerList(args) {
 // what the screen says lives here so it can be driven from a key script in the
 // tests; only the loop that gets bytes and the writes that paint them are I/O.
 //
-// There is no prompt library because there cannot be one: the plugin ships as
+// There is no prompt library because there cannot be one. The plugin ships as
 // a bare git clone with no node_modules, and hooks/hooks.json runs this file on
 // every SessionStart. An unresolved import would crash before main() and break
 // every plugin user's sessions. See internal/INTERACTIVE-UX.md.
@@ -494,8 +494,8 @@ export function decodeKey(bytes) {
     }
   }
 
-  // CSI (ESC [ x) and SS3 (ESC O x) — the second covers terminals in
-  // application-cursor mode, which is not exotic: it is what happens inside
+  // CSI (ESC [ x) and SS3 (ESC O x). The second covers terminals in
+  // application-cursor mode, which is not exotic. It is what happens inside
   // less, tmux copy-mode, and some ssh sessions.
   if (b[0] === 0x1b && (b[1] === 0x5b || b[1] === 0x4f) && b.length >= 3) {
     switch (b[2]) {
@@ -517,12 +517,12 @@ export function decodeKey(bytes) {
 }
 
 /**
- * Advance a picker's state by one key. Pure: returns a new state, never
+ * Advance a picker's state by one key. Returns a new state, never
  * mutates, and never does anything but move the cursor and set flags.
  *
  * `done` and `cancelled` are the two terminal flags; `action` carries a hotkey
  * the caller registered (the dashboard's `r` for refresh) back out of the loop.
- * Cancelling is always distinguishable from confirming an empty selection —
+ * Cancelling is always distinguishable from confirming an empty selection.
  * "no connections here" is a real choice and must not be confused with "never
  * mind".
  */
@@ -609,7 +609,7 @@ function clip(text, width) {
 /**
  * Render the whole interactive region, footer included.
  *
- * The footer is inside the redrawn block on purpose: the verify picker's cost
+ * The footer is inside the redrawn block on purpose. The verify picker's cost
  * estimate has to move as rows are toggled, and a number that only appears
  * after you commit is not a number anyone can act on.
  */
@@ -660,7 +660,7 @@ export function keyHints(state) {
  * The command that reproduces what the picker just did.
  *
  * Every interactive action echoes one of these. The interface is meant to be
- * training wheels, not a dependency — someone who uses `switch` three times
+ * training wheels, not a dependency. Someone who uses `switch` three times
  * should end up typing it directly.
  */
 export function switchArgv({ active, owned, write = false, pfx = DEFAULT_PREFIX }) {
@@ -703,10 +703,10 @@ export function verifyCost(count) {
 /**
  * What a dashboard row is worth knowing at a glance.
  *
- * No staleness marker here: the dashboard prints the age in its own column, so
+ * No staleness marker here. The dashboard prints the age in its own column, so
  * "45d ago" already says it, and spending width on saying it twice pushes the
- * site names — the only thing that catches a grant pointed at the wrong
- * target — off the end of the line.
+ * site names off the end of the line. Site names are the only thing that
+ * catches a grant pointed at the wrong target.
  */
 export function describeVerification(row) {
   if (row.verifyFailed) return 'last check failed'
@@ -734,12 +734,12 @@ export function dashboardProblems({ rows = [], activation = {} } = {}) {
   }
 
   // The built-in claude.ai Webflow connector being available is NOT listed
-  // here. It is a fact about the project, not a defect: choosing `--none` and
+  // here. It is a fact about the project, not a defect. Choosing `--none` and
   // using the built-in connector is a legitimate end state, and plenty of
   // people want exactly that. Flagging it warns someone about a decision they
   // already made, and promoting it to the first menu row as "Fix this" says
   // the tool knows better than they do. It is stated neutrally on the
-  // dashboard instead, and the choice is offered where it belongs — at the
+  // dashboard instead, and the choice is offered where it belongs, at the
   // moment of switching to none.
 
   const unchecked = rows.filter((r) => r.sites === null && !r.verifyFailed)
@@ -755,8 +755,8 @@ export function dashboardProblems({ rows = [], activation = {} } = {}) {
 }
 
 /**
- * The dashboard menu. Derived, not fixed: there is no Switch row before there
- * is anything to switch between, and no Status row ever — the dashboard above
+ * The dashboard menu. Derived, not fixed. There is no Switch row before there
+ * is anything to switch between, and no Status row ever. The dashboard above
  * the menu IS status.
  */
 export function menuItems({ rows = [], problems = [] } = {}) {
@@ -776,8 +776,8 @@ export function menuItems({ rows = [], problems = [] } = {}) {
 // I/O below this line.
 // ---------------------------------------------------------------------------
 
-// Compare real paths, not URLs. When this file is reached through a symlink —
-// `npm link`, a PATH shim, or ${CLAUDE_PLUGIN_ROOT}/bin on PATH — argv[1] is the
+// Compare real paths, not URLs. When this file is reached through a symlink,
+// `npm link`, a PATH shim, or ${CLAUDE_PLUGIN_ROOT}/bin on PATH, argv[1] is the
 // symlink while import.meta.url is the resolved target, so a URL comparison is
 // false and the CLI exits 0 having printed nothing. That silent success is the
 // worst possible failure mode, so this guard is exercised by a test.
@@ -827,8 +827,8 @@ const sym = { ok: '✔', warn: '⚠', bad: '✘', dot: '●', ring: '○' }
  * Are we running inside a Claude Code session (the Bash tool or a hook)?
  *
  * This decides who is told to do the next step. A plugin install puts `wwm` on
- * PATH inside sessions ONLY, so the user's own terminal — the one place they
- * can run `claude mcp login` — is exactly the place `wwm verify` does not
+ * PATH inside sessions ONLY, so the user's own terminal, the one place they
+ * can run `claude mcp login`, is exactly the place `wwm verify` does not
  * exist. Handing them a `wwm` command there is a guaranteed `command not
  * found`, and it is the agent, not the user, that should run the check.
  */
@@ -848,7 +848,7 @@ function canPrompt() {
  *
  * Reads from /dev/tty rather than fd 0 so a prompt still reaches the user when
  * stdout or stdin is redirected. Returns null on EOF (^D) or if no terminal can
- * be opened — callers must treat that as "no answer", never as an empty answer.
+ * be opened. Callers must treat that as "no answer", never as an empty answer.
  */
 function promptLine(question) {
   let fd
@@ -902,7 +902,7 @@ const HIDE_CURSOR = '\x1b[?25l'
  * The terminal we have put into raw mode, if any.
  *
  * Leaving a terminal raw with a hidden cursor is the worst thing this tool
- * could do to someone — no echo, no cursor, and no obvious way back short of
+ * could do to someone. No echo, no cursor, and no obvious way back short of
  * `reset`. So restoration is idempotent, runs from a `finally`, AND is
  * registered on process exit, because the paths out of a picker include
  * exceptions and ^C as well as a normal return.
@@ -924,7 +924,7 @@ process.on('exit', restoreTty)
  * Put /dev/tty in raw mode, or return null if this terminal cannot do it.
  *
  * WWM_NO_RAW forces the numbered fallback. It exists for the tests, and for
- * anyone whose terminal renders the redrawing picker badly — a screen reader,
+ * anyone whose terminal renders the redrawing picker badly, a screen reader,
  * a serial console, an editor's embedded shell.
  */
 function openRawTty() {
@@ -957,7 +957,7 @@ function ttyWidth() {
 /**
  * Sleep synchronously, without the event loop.
  *
- * The tty is non-blocking, so `readKey` below spins on EAGAIN — measured at
+ * The tty is non-blocking, so `readKey` below spins on EAGAIN. Measured at
  * ~360k iterations in 700ms, which is a pegged core for as long as a menu is on
  * screen. Parking the thread between polls costs at most `ms` of added latency
  * on a keypress and takes the idle cost to nothing.
@@ -973,7 +973,7 @@ function idleSleep(ms) {
  * `onIdle` runs on each turn of the EAGAIN spin, which is the only place this
  * synchronous interactive kernel has to offer anyone. It is what lets the
  * dashboard animate a spinner and pick up a background `mcp list` while still
- * blocking on a key — see `pick`.
+ * blocking on a key. See `pick`.
  */
 function readKey(fd, onIdle = null) {
   const buf = Buffer.alloc(16)
@@ -999,7 +999,7 @@ function readKey(fd, onIdle = null) {
  * Run a picker to completion.
  *
  * Returns { indexes, cancelled, action }. Callers must branch on `cancelled`
- * before reading `indexes` — an empty selection that was confirmed and a picker
+ * before reading `indexes`. An empty selection that was confirmed and a picker
  * that was escaped mean opposite things, and `switch --none` is exactly the
  * case where treating them the same would deactivate everything by accident.
  */
@@ -1023,7 +1023,7 @@ function pick({ title = null, items, multi = false, checked = null, cursor = 0, 
   // wrong place and starts eating the scrollback. So the header only joins the
   // repainted region when it demonstrably fits; otherwise it is printed once,
   // above the region, and only the menu redraws under it.
-  // Same shape of guard as ttyWidth: a terminal that reports an implausible
+  // Same shape of guard as ttyWidth. A terminal that reports an implausible
   // height (0 under some ptys, unset when stderr is not the tty) must fall back
   // to an assumption, not disable the header by arithmetic accident.
   const reported = process.stderr.rows
@@ -1064,9 +1064,9 @@ function pick({ title = null, items, multi = false, checked = null, cursor = 0, 
     }
     // Erase the picker. What was chosen gets reported by the caller in one
     // line; leaving a stale checkbox list above it just makes the scrollback
-    // harder to read. The header is put back: it was inside the repainted
+    // harder to read. The header is put back. It was inside the repainted
     // region only so its health column could resolve, and it is context for
-    // whatever the chosen action prints next — exactly as when it was printed
+    // whatever the chosen action prints next, exactly as when it was printed
     // above the region.
     if (painted) {
       OUT(`\x1b[${painted}A`)
@@ -1081,12 +1081,12 @@ function pick({ title = null, items, multi = false, checked = null, cursor = 0, 
 }
 
 /**
- * The degraded path: numbered lists over plain line reads.
+ * The degraded path is numbered lists over plain line reads.
  *
- * Reached when there is no controlling terminal or raw mode is refused — a
+ * Reached when there is no controlling terminal or raw mode is refused. A
  * dumb terminal, some CI shells, Windows (where /dev/tty does not exist and
  * `promptLine` already returns null). Not dead code, and not a lesser feature
- * set: everything the arrow-key picker can express is expressible here.
+ * set. Everything the arrow-key picker can express is expressible here.
  */
 function pickNumbered({ items, multi, checked, footer }) {
   const state = initPicker({ items, multi, checked })
@@ -1195,7 +1195,7 @@ function askText(label, { initial = '', preview = null, validate = null } = {}) 
   return value
 }
 
-/** y/N over a plain line read — no raw mode needed for one character. */
+/** y/N over a plain line read. No raw mode needed for one character. */
 function askConfirm(question, { defaultYes = false } = {}) {
   const answer = promptLine(`  ${question} ${defaultYes ? '[Y/n]' : '[y/N]'} `)
   if (answer === null) return false
@@ -1245,7 +1245,7 @@ function runClaude(args, { cwd = undefined, timeout = 180_000, input = undefined
   // "stdin isn't a terminal" even when wwm itself is running in Terminal.app.
   // Inheriting hands over our TTY; the cost is that the child's output goes
   // straight to the terminal and we get status only.
-  // Drop the list cache whatever the exit status: a `mcp remove` that reports
+  // Drop the list cache whatever the exit status. A `mcp remove` that reports
   // a failure may still have removed the server, and a stale "it's still
   // there" is the more misleading of the two answers.
   if (mutatesServerList(args)) invalidateListCache()
@@ -1317,7 +1317,7 @@ function readClaudeJson() {
 }
 
 /**
- * The `projects` map is keyed on the RESOLVED cwd — hence /private/tmp/... on
+ * The `projects` map is keyed on the RESOLVED cwd, hence /private/tmp/... on
  * macOS rather than /tmp/.... Writing the unresolved path creates a key
  * nothing ever reads, and the failure is silent.
  */
@@ -1520,7 +1520,7 @@ function listServers({ refresh = false, staleSeconds = 60 } = {}) {
  * The configured server set, with no health, read straight from ~/.claude.json.
  *
  * `claude mcp list` is the only source of health and it costs 2-4s, because it
- * opens a real connection to every configured server — including the ones wwm
+ * opens a real connection to every configured server, including the ones wwm
  * does not own and will never show. Every other column of the dashboard comes
  * from somewhere free: label and sites from state.json, active from the
  * `disabledMcpServers` list in this same file. So the names alone are enough to
@@ -1528,7 +1528,7 @@ function listServers({ refresh = false, staleSeconds = 60 } = {}) {
  * into a column already sized for it.
  *
  * This reads the file `disabledServersFor` already reads, so it adds no new
- * dependency on Claude Code's config shape. Returns null — not an empty list —
+ * dependency on Claude Code's config shape. Returns null, not an empty list,
  * when the file is missing or unreadable, because "no servers" and "could not
  * tell" must not render the same; the caller falls back to the blocking path.
  */
@@ -1554,7 +1554,7 @@ function shq(s) { return `'${String(s).replace(/'/g, `'\\''`)}'` }
  * Start `claude mcp list` in the background, and hand back a synchronous poll.
  *
  * The picker's read loop is a synchronous EAGAIN spin (see `readKey`), so the
- * event loop never turns while a menu is on screen — an async child's 'data'
+ * event loop never turns while a menu is on screen. An async child's 'data'
  * handler would simply never fire. The output therefore has to land somewhere a
  * synchronous poll can see, which means a file.
  *
@@ -1629,13 +1629,13 @@ function verifyOne(name, { model = 'haiku', timeout = 180_000 } = {}) {
     'Call data_sites_tool with action list_sites. Then reply with the site displayNames only, one per line.',
     '--mcp-config', JSON.stringify({ mcpServers: { [name]: { type: 'http', url } } }),
     // Without --strict-mcp-config a verify against one connection loads every
-    // configured server's schemas — the exact context bloat this tool exists
+    // configured server's schemas, the exact context bloat this tool exists
     // to fix, paid on every verification.
     '--strict-mcp-config',
     '--allowedTools', `mcp__${name}__data_sites_tool`,
     // Webflow's server instructs models to call webflow_guide_tool first, and
     // that call returns ~60KB. Narrowing --allowedTools alone does NOT avoid
-    // it: the model tries anyway, hits the permission block, and gives up
+    // it. The model tries anyway, hits the permission block, and gives up
     // without answering. Only a system-prompt override actually works.
     '--system-prompt',
     'You are a scope checker. Do NOT call webflow_guide_tool or any setup/guide tool; it is not available and not needed. Call data_sites_tool directly with action=list_sites, then answer.',
@@ -1741,7 +1741,7 @@ function cmdVerify(args) {
     results.push(result)
     recordVerification(state, name, result)
 
-    // A grant covering several sites is a normal thing to authorize — Webflow's
+    // A grant covering several sites is a normal thing to authorize. Webflow's
     // picker is multi-select on purpose. Report the list; do not editorialise
     // about its length. Only "we could not check" is a problem here.
     if (!result.ok) {
@@ -1766,7 +1766,7 @@ function cmdVerify(args) {
 }
 
 /**
- * The verify picker — the one screen in this tool that spends money, so the
+ * The verify picker, the one screen in this tool that spends money, so the
  * bill is on screen and moves as the selection changes.
  *
  * Returns null when cancelled; an empty array is a real answer ("check
@@ -1790,7 +1790,7 @@ function pickConnectionsToVerify(state) {
   const items = rows.map((r, i) => {
     if (plan[i].never) return { label: r.server, hint: 'never checked' }
     if (plan[i].failed) return { label: r.server, hint: 'last check failed' }
-    // "stale" goes before the site list, not after: it is the reason the row
+    // "stale" goes before the site list, not after. It is the reason the row
     // arrives ticked, and a long site list would otherwise truncate it away.
     return {
       label: r.server,
@@ -1825,7 +1825,7 @@ const CONNECT_USAGE = 'Usage: wwm connect [<slug>] [--label "Name"] [--print-com
 /**
  * Ask for the client name when `wwm connect` was run bare.
  *
- * Only when a human is actually there: with --json, --quiet, --yes or no TTY,
+ * Only when a human is actually there. With --json, --quiet, --yes or no TTY,
  * a prompt would either corrupt the output stream or hang a script forever, so
  * those keep the old usage error.
  */
@@ -1843,7 +1843,7 @@ function askForSlug() {
   OUT('\n')
 
   // The preview is the whole reason this is a live-redrawing field rather than
-  // a readline call: slugification is otherwise silent, and the name someone
+  // a readline call. Slugification is otherwise silent, and the name someone
   // types is not always the name they get.
   const answer = askText('Client name', {
     preview: (v) => {
@@ -1874,7 +1874,7 @@ function cmdConnect(args) {
     (interactive ? (askText('Label       ', { initial: defaultLabel }) ?? defaultLabel) : defaultLabel)
   const url = args.flags.url ?? mcpUrl()
 
-  // Collision check first — never let `already exists in local config` reach
+  // Collision check first. Never let `already exists in local config` reach
   // the user raw.
   const listed = listServers({ refresh: true })
   if (listed.servers.some((s) => s.name === name)) {
@@ -1959,7 +1959,7 @@ function cmdConnect(args) {
     human('')
   }
 
-  // Raw mode is off by here — `pick` restores in a finally — which matters
+  // Raw mode is off by here. `pick` restores in a finally, which matters
   // because the login child takes the terminal with stdio: 'inherit'.
   const loginArgs = ['mcp', 'login', name]
   if (args.flags['no-browser']) loginArgs.push('--no-browser')
@@ -1967,7 +1967,7 @@ function cmdConnect(args) {
 
   if (!login.dryRun && login.status !== 0) {
     // Under stdio: 'inherit' the child's diagnostics already went to the
-    // terminal, so there is nothing to quote back — pointing at empty output
+    // terminal, so there is nothing to quote back. Pointing at empty output
     // would read as if we lost it.
     const detail = (login.stderr || login.stdout).trim() || 'See the output above.'
     const rollback = rollbackConnect(name)
@@ -2026,7 +2026,7 @@ function cmdConnect(args) {
     // Measured on 2.1.223: a server added AND authorized mid-session became
     // callable from an already-running session with no restart. This line used
     // to claim the opposite on no evidence. Don't reinstate it without a
-    // measurement — a spurious restart is a real cost in a setup flow.
+    // measurement. A spurious restart is a real cost in a setup flow.
     human('Its tools are available now — no restart needed.')
   }
 
@@ -2050,7 +2050,7 @@ function cmdConnect(args) {
 
 function rollbackConnect(name) {
   // `mcp remove` is grant-destructive on its own, but logout-then-remove is
-  // still the correct order: logout while the named entry exists.
+  // still the correct order. Logout while the named entry exists.
   const out = []
   const logout = runClaude(['mcp', 'logout', name])
   out.push(`logout ${logout.status === 0 ? 'ok' : 'failed'}`)
@@ -2093,7 +2093,7 @@ function gatherStatus({ refresh = false, staleSeconds = 60, dir = resolvedCwd(),
       singleSite: v?.ok ? (v.singleSite ?? v.isolated ?? null) : null,
       verifiedAt: v?.at ?? null,
       verifyFailed: Boolean(v && !v.ok),
-      // ACTIVE is not an `mcp list` field: a disabled server still prints
+      // ACTIVE is not an `mcp list` field. A disabled server still prints
       // "✔ Connected". It must be read from disabledMcpServers.
       active: !disabled.has(s.name),
     }
@@ -2121,14 +2121,14 @@ function gatherStatus({ refresh = false, staleSeconds = 60, dir = resolvedCwd(),
  * Fold a late-arriving `mcp list` into a snapshot already on screen.
  *
  * Only `health` and `statusText` are touched, and no row is added or removed.
- * That is deliberate rather than lazy: the menu is built from this snapshot and
+ * That is deliberate rather than lazy. The menu is built from this snapshot and
  * the user's cursor is sitting in it, so a row appearing or vanishing under the
  * keyboard would move the selection between the keypress and the action. Every
  * other field came from state.json and ~/.claude.json, which the slow call has
  * nothing to say about anyway, so there is nothing else it could correct.
  *
  * A server in the config that the list does not mention reads as `unknown`, not
- * as connected — the list is the authority on health, and silence from it is
+ * as connected. The list is the authority on health, and silence from it is
  * not good news.
  */
 function applyHealth(snap, listed) {
@@ -2173,14 +2173,14 @@ function cmdStatus(args) {
 
   // With nothing of ours loaded, Claude Code unhides its own Webflow connector
   // against the same URL. Worth stating, because "no wf- connection here" does
-  // not mean "no Webflow here" — but it is a fact about the project, not a
+  // not mean "no Webflow here". It is a fact about the project, not a
   // fault. `wwm switch --none` offers the choice; status just reports it.
   if (activeCount === 0 && !activation.connectorsSuppressed) {
     human(`Claude Code's own Webflow connector can load here.`)
   }
   if (activation.connectorsSuppressed) human('No claude.ai connectors load in this project.')
 
-  // Two connections in one workspace is often intentional — an agency's own
+  // Two connections in one workspace is often intentional. An agency's own
   // workspace holding several clients' sites. State the fact without a verdict
   // attached; the user knows their own account shape.
   const byWorkspace = new Map()
@@ -2199,7 +2199,7 @@ function cmdStatus(args) {
 
 /**
  * The header above the menu. This is `status`, rendered for a human who is
- * about to do something — hence no column headings, and the active/inactive
+ * about to do something, hence no column headings, and the active/inactive
  * distinction carried by a symbol rather than a word.
  */
 const SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
@@ -2227,8 +2227,8 @@ function dashboardLines({ rows, activation, dir }, { tick = 0 } = {}) {
     const reach = describeVerification(r)
     const age = r.sites === null ? '' : relativeTime(r.verifiedAt)
     // `checking` is the one health that is neither good nor bad news, so it
-    // gets the spinner and the dim treatment rather than the warning glyph —
-    // an unresolved column must not read as a problem for the seconds it takes
+    // gets the spinner and the dim treatment rather than the warning glyph.
+    // An unresolved column must not read as a problem for the seconds it takes
     // to resolve.
     const health = r.health === 'connected' ? ''
       : r.health === 'checking' ? ` ${c.dim(`${SPIN[tick % SPIN.length]} checking`)}`
@@ -2242,7 +2242,7 @@ function dashboardLines({ rows, activation, dir }, { tick = 0 } = {}) {
   out.push(`  ${c.dim(`${activeCount} of ${rows.length} active here · from ${activation.source}`)}`)
 
   // Stated, not warned about. "No wf- connection here" does not mean "no
-  // Webflow here", and that is worth knowing — but it is not a problem, and
+  // Webflow here", and that is worth knowing. It is not a problem, and
   // it gets no glyph and no menu row.
   if (activeCount === 0 && !activation.connectorsSuppressed) {
     out.push(`  ${c.dim(`Claude Code's own Webflow connector can load here.`)}`)
@@ -2261,7 +2261,7 @@ function dashboardLines({ rows, activation, dir }, { tick = 0 } = {}) {
  *
  * Every branch dispatches into the same command functions the flags reach, so
  * there is no second implementation of anything and no behaviour that exists
- * only in here. A `Fail` from a flow is rendered and swallowed — one bad answer
+ * only in here. A `Fail` from a flow is rendered and swallowed. One bad answer
  * should cost you a menu, not the session.
  */
 /**
@@ -2270,8 +2270,8 @@ function dashboardLines({ rows, activation, dir }, { tick = 0 } = {}) {
  * The order of preference is the order of cost. A young cache is free and
  * accurate, so it wins. Otherwise the names come out of ~/.claude.json for
  * nothing and health is left to catch up in the background. Only if that file
- * cannot be read, or the fetch cannot be started, do we fall back to blocking —
- * a slow dashboard being much better than none.
+ * cannot be read, or the fetch cannot be started, do we fall back to blocking.
+ * A slow dashboard is much better than none.
  */
 function menuSnapshot({ refresh }) {
   if (!refresh) {
@@ -2295,7 +2295,7 @@ function cmdMenu() {
     refresh = false
     let pending = started
 
-    // Neither of these reads health — checked, and the reason it matters is
+    // Neither of these reads health. That is checked, and the reason it matters is
     // that they are computed before health exists. The menu the user is
     // pointing at is therefore final from the first frame, and cannot
     // reshuffle under the cursor when the list lands.
@@ -2307,7 +2307,7 @@ function cmdMenu() {
       ? () => {
         if (!pending) return false // already landed; nothing left to animate
         const got = pending()
-        if (!got) return true // still running — repaint to advance the spinner
+        if (!got) return true // still running. Repaint to advance the spinner
         pending = null
         // An unparseable list leaves health unknown rather than taking the
         // menu down; `wwm doctor` is where that gets diagnosed properly.
@@ -2339,7 +2339,7 @@ function runMenuChoice(id, snap) {
   switch (id) {
     case 'fix-file-conflict': {
       // Make the committed file agree with what is loaded, rather than the
-      // other way round — the user just looked at this set and kept it.
+      // other way round. The user just looked at this set and kept it.
       const active = snap.rows.filter((r) => r.active).map((r) => r.server)
       return active.length === 0
         ? cmdSwitch({ flags: { none: true, write: true }, positional: [] })
@@ -2413,7 +2413,7 @@ function cmdRemove(args) {
  */
 const CANCELLED = Symbol('cancelled')
 
-/** Pick what to remove — with what it currently reaches shown in the list. */
+/** Pick what to remove, with what it currently reaches shown in the list. */
 function pickConnectionToRemove() {
   const state = loadState()
   const owned = ownedNames(state)
@@ -2435,7 +2435,7 @@ function pickConnectionToRemove() {
 
 /**
  * The only irreversible action in the tool, so it is deliberately harder than
- * the rest of the interface: the escape hatch is offered first, and confirming
+ * the rest of the interface. The escape hatch is offered first, and confirming
  * is a typed name rather than a keypress.
  */
 function confirmRemoval(name) {
@@ -2464,7 +2464,7 @@ function confirmRemoval(name) {
 
 /**
  * The connections wwm manages. Removed ones are kept in state.json so a re-add
- * restores the label, but they no longer exist as servers — disabling a name
+ * restores the label, but they no longer exist as servers. Disabling a name
  * that is not configured is harmless noise in someone else's config file.
  */
 function ownedNames(state) {
@@ -2482,7 +2482,7 @@ function readWickedFile(dir) {
  * Apply an active set to a directory: the disabledMcpServers merge, plus the
  * connector suppression that has to accompany an empty set.
  *
- * `suppress` is a decision made by the caller, never here — the connector key
+ * `suppress` is a decision made by the caller, never here. The connector key
  * disables EVERY claude.ai cloud connector in the project (Figma, Linear,
  * whatever the user has), so writing it is a consent question, and the hook
  * has nobody to ask.
@@ -2501,7 +2501,7 @@ function applyActivation(dir, active, owned, { suppress = 'skip' } = {}) {
   } else if (active.length > 0 && already && suppress !== 'keep') {
     // Only ever undo suppression we are responsible for. If the user put the
     // key there themselves, removing it turns their connectors back on behind
-    // their back — the same silent-write sin in the other direction.
+    // their back. The same silent-write sin in the other direction.
     const state = loadState()
     if (state.projects?.[resolvedCwd(dir)]?.suppressedConnectors) {
       const res = writeSettingsKey(dir, null)
@@ -2526,7 +2526,7 @@ const SWITCH_USAGE = `Usage: wwm switch <slug>... | --all | --none | --default  
   --write     also record the set in ${WICKED_FILE} so it travels with the repo`
 
 function cmdSwitch(args) {
-  // Deliberately no preflight: switch runs no subprocess and touches no
+  // Deliberately no preflight. switch runs no subprocess and touches no
   // credential. Refusing to edit a JSON file because `claude` is not on PATH
   // would be gratuitous.
   const dir = resolvedCwd(args.flags.project ?? process.cwd())
@@ -2620,7 +2620,7 @@ function cmdSwitch(args) {
   const file = readWickedFile(dir)
   const fileConflict = file && !write &&
     !sameList([...new Set(file.entries.map((e) => toServerName(e, prefix())))].filter((n) => owned.includes(n)), active)
-  // Same precedence status uses: a committed file still wins at session start,
+  // Same precedence status uses. A committed file still wins at session start,
   // even after `--default` forgets plugin state.
   const source = file ? WICKED_FILE : args.flags.default ? 'default (all)' : 'plugin state'
 
@@ -2672,7 +2672,7 @@ function cmdSwitch(args) {
  * the thing that changes that. Health comes from the last verification we
  * recorded rather than a live check.
  *
- * Returns null when cancelled — the caller must not confuse that with [].
+ * Returns null when cancelled. The caller must not confuse that with [].
  */
 function pickActiveSet(dir, state, owned) {
   const disabled = new Set(disabledServersFor(dir))
@@ -2726,7 +2726,7 @@ function writeWickedFile(dir, active) {
  *
  * The question is about the consequence, not the mechanism. An earlier version
  * of this screen led with the settings key and the file path and the words
- * "all-or-nothing", which is the implementation talking: it asks someone to
+ * "all-or-nothing", which is the implementation talking. It asks someone to
  * weigh a decision by reading our plumbing. What actually matters is that one
  * option leaves the built-in connector available and the other switches off
  * every claude.ai connector in the project. Both are reasonable; neither is
@@ -2741,7 +2741,7 @@ function askAboutConnector() {
   OUT(`  Turning it off also turns off Figma, Linear and Notion here.\n`)
   OUT('\n')
 
-  // The consequence lives in the prose above rather than in row hints: hints
+  // The consequence lives in the prose above rather than in row hints. Hints
   // share a line with the label and get truncated on an 80-column terminal,
   // which would clip exactly the part that makes this a real decision.
   const choice = pick({
@@ -2779,8 +2779,8 @@ function reportConnector(connector, active, { asked = false } = {}) {
 }
 
 /**
- * SessionStart hook entry point. Runs on EVERY session start, so: no network,
- * no subprocess, no prompt, and never fatal — a failure here must not block
+ * SessionStart hook entry point. Runs on EVERY session start, so no network,
+ * no subprocess, no prompt, and never fatal. A failure here must not block
  * the user's session. Everything lands in the log and we exit 0 regardless.
  */
 function cmdActivate(args) {
@@ -2789,7 +2789,7 @@ function cmdActivate(args) {
     try { appendFileSync(join(stateDir(), 'activate.log'), `${new Date().toISOString()} ${dir} ${msg}\n`) } catch { /* best effort */ }
   }
 
-  // Every path below reports through this, including the failures — `--json`
+  // Every path below reports through this, including the failures. `--json`
   // callers get parseable output whatever happened, and the exit code stays 0.
   const out = { ok: true, cwd: dir, source: null, active: [], disabled: [], unknown: [], changed: false, error: null }
 
@@ -2808,7 +2808,7 @@ function cmdActivate(args) {
         pfx: prefix(),
       })
 
-      // The hook never writes the connector key — that decision disables other
+      // The hook never writes the connector key. That decision disables other
       // vendors' connectors and belongs to a human running `wwm switch --none`.
       const result = applyActivation(dir, resolved.active, owned, { suppress: 'keep' })
 
@@ -2856,7 +2856,7 @@ export const SITES_COL = 30
  * Render the SITES cell.
  *
  * This column used to read "1 site (just now)". That is the count, and the
- * count is the least interesting thing about a grant — a connection reaching
+ * count is the least interesting thing about a grant. A connection reaching
  * three sites is fine if those are the client's three sites, and a connection
  * reaching one site is useless if it is the wrong one. The site NAME is what
  * a user can actually check against their own intent, and it was being thrown
@@ -2953,8 +2953,8 @@ function main(argv) {
   if (parsed.flags.version || command === 'version') return cmdVersion()
 
   if (!command) {
-    // A terminal gets the dashboard and a menu. Everything else — piped,
-    // scripted, --json, --quiet, --yes, the agent's Bash tool, CI — keeps the
+    // A terminal gets the dashboard and a menu. Everything else, piped,
+    // scripted, --json, --quiet, --yes, the agent's Bash tool, CI, keeps the
     // old contract exactly: usage on stdout, exit 2. Nothing automated can
     // start hanging on a prompt because of this.
     if (canPrompt()) return cmdMenu()

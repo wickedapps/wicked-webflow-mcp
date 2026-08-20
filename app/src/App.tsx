@@ -204,8 +204,8 @@ function describeWwmSetup(
   }
 
   if (error?.kind === 'cli-upgrade' || missingWwm || staleWwm) {
-    // The bundled copy is present but would not run. Node is the overwhelmingly
-    // likely cause — it is the one prerequisite bundling does not remove — and
+    // The bundled copy is present but would not run. Node is almost always
+    // the cause. It is the one prerequisite bundling does not remove, and
     // there is nothing to install, so this offers a re-check rather than a fix
     // it cannot perform.
     if (wwm.usesBundledBin(located)) {
@@ -271,6 +271,9 @@ function describeNotices(
   }
   return notices
 }
+
+/** Health states where the grant does not exist yet, so there is nothing to verify. */
+const AUTH_PENDING = new Set<wwm.Health>(['needs_auth', 'pending_approval'])
 
 const HEALTH_LABEL: Record<wwm.Health, string> = {
   connected: 'Connected',
@@ -343,7 +346,7 @@ function Status({
   )
 }
 
-/** `sites: null` is never verified — not the same as verified and empty. */
+/** `sites: null` is never verified, not the same as verified and empty. */
 function Sites({ row }: { row: wwm.ServerRow }) {
   if (row.sites === null) return <span className="muted">Unverified</span>
   if (row.sites.length === 0) return <span className="warn">No sites</span>
@@ -503,7 +506,7 @@ export default function App() {
    *
    * A failed verify still writes lastVerified into state (ok: false) before it
    * exits 6. If we skipped the reread, the card would keep the last successful
-   * site list and still say connected — which is true of the handshake, and
+   * site list and still say connected, which is true of the handshake, and
    * the wrong thing to lead with.
    */
   const verifyServer = async (server: string) => {
@@ -524,7 +527,7 @@ export default function App() {
   }
 
   /**
-   * Open a folder: read its status first, adopt it only if that worked.
+   * Open a folder. Read its status first, adopt it only if that worked.
    *
    * A recents entry can point at a folder that has since been deleted or lives
    * on an unmounted volume, and switching to it would then silently write a
@@ -565,7 +568,7 @@ export default function App() {
       .map((s) => s.server)
     const previous = data
     // switch replaces the whole active set; it is not a per-server flag.
-    // Flip now — switch itself is a JSON write, and waiting on a status
+    // Flip now. switch itself is a JSON write, and waiting on a status
     // reread would make the button look like it ignored the click.
     setData(applyActive(data, next))
     setBusy('Switching')
@@ -611,7 +614,7 @@ export default function App() {
         setAdding(false)
         // Open the pty immediately. connect already ran a live `mcp list`
         // (collision check) and then invalidated that cache, so a status
-        // reread here would health-check every server again — and could
+        // reread here would health-check every server again, and could
         // overwrite a toggle the user made while the sheet was open.
         setData((cur) => {
           if (!cur || cur.servers.some((s) => s.server === res.server)) return cur
@@ -762,8 +765,20 @@ export default function App() {
                   </p>
                 </div>
                 <div className="card-actions">
+                  {/*
+                   * No grant yet means verify can only fail, and it fails
+                   * expensively. It spends a model call, then overwrites the
+                   * card's "Needs auth", the one status that says what to do,
+                   * with "Verification failed". `failed` stays verifiable,
+                   * since a handshake can fail for reasons a retry clears.
+                   */}
                   <button
-                    disabled={busy !== null}
+                    disabled={busy !== null || AUTH_PENDING.has(row.health)}
+                    title={
+                      AUTH_PENDING.has(row.health)
+                        ? 'Authorize first — there is no grant to check yet.'
+                        : undefined
+                    }
                     onClick={() => void verifyServer(row.server)}
                   >
                     Verify

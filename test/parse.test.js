@@ -100,7 +100,7 @@ test('parseMcpList recognises all four health states', () => {
 
 test('parseMcpList degrades loudly on an unknown status', () => {
   // Reporting a wrong status is far worse than reporting none. An unrecognised
-  // line must surface as unparsed so the caller can exit 7.
+  // line must be reported as unparsed so the caller can exit 7.
   const { servers, unparsed, ok } = parseMcpList(fixture('mcp-list-unknown-glyph.txt'))
   assert.equal(ok, false)
   assert.equal(servers.length, 1)
@@ -147,7 +147,7 @@ test('parseMcpGet flags a missing server rather than guessing', () => {
 })
 
 // ---------------------------------------------------------------------------
-// verify transcripts — the security-critical parser
+// verify transcripts. The security-critical parser
 // ---------------------------------------------------------------------------
 
 test('parseVerifyTranscript extracts one site from a real transcript', () => {
@@ -322,7 +322,7 @@ test('isMainPath resolves symlinks before comparing', () => {
 })
 
 test('isMainPath is false when imported as a module', () => {
-  // The other half of the contract: importing bin/wwm from a test must not run
+  // The other half of the contract. Importing bin/wwm from a test must not run
   // the CLI. Without this, "fix" the guard by returning true and 25 tests pass.
   assert.equal(isMainPath('/usr/bin/node', import.meta.url), false)
   assert.equal(isMainPath(undefined, import.meta.url), false)
@@ -340,8 +340,8 @@ test('isMainPath does not throw on a nonexistent argv[1]', () => {
 // ---------------------------------------------------------------------------
 
 test('formatSites states the facts without editorialising', () => {
-  // A multi-site grant used to print a ⚠ here. It is a normal authorization —
-  // the cell reports what the connection reaches and lets the user judge it.
+  // A multi-site grant used to print a ⚠ here. It is a normal authorization.
+  // The cell reports what the connection reaches and lets the user judge it.
   assert.equal(formatSites(['Dino'], ' (2h ago)'), 'Dino (2h ago)')
   assert.equal(formatSites(['A', 'B', 'C'], ''), '3: A, B, C')
   assert.ok(!formatSites(['A', 'B', 'C'], '').includes('⚠'))
@@ -358,7 +358,7 @@ test('formatSites drops whole names rather than clipping one', () => {
 })
 
 // ---------------------------------------------------------------------------
-// activation — the differentiator, and the one with silent failure modes
+// activation. The differentiator, and the one with silent failure modes
 // ---------------------------------------------------------------------------
 
 test('parseWickedFile ignores comments and blank lines', () => {
@@ -464,8 +464,8 @@ function sandbox(t, { claudeJson = { projects: {} }, connections = ['wf-a', 'wf-
 test('switch writes the RESOLVED cwd, not the path it was given', (t) => {
   // The silent-success bug: write projects["/tmp/x"] when Claude Code reads
   // projects["/private/tmp/x"] and activation appears to work while the next
-  // session loads everything. Nothing surfaces it — status reads back what we
-  // just wrote — so it needs an explicit assertion, not a smoke test.
+  // session loads everything. Nothing shows it. status reads back what we
+  // just wrote, so it needs an explicit assertion, not a smoke test.
   const box = sandbox(t)
   const real = join(box.base, 'project')
   const link = join(box.base, 'link-to-project')
@@ -501,7 +501,7 @@ test('switch --none suppresses the claude.ai connector, and switch back restores
   const box = sandbox(t)
   const settings = join(project, '.claude', 'settings.json')
 
-  // --yes is consent: the key disables every claude.ai connector in the
+  // --yes is consent. The key disables every claude.ai connector in the
   // project, so it is never written without being asked for.
   const none = box.run(['switch', '--none', '--project', project, '--yes'])
   assert.deepEqual(none.active, [])
@@ -510,7 +510,7 @@ test('switch --none suppresses the claude.ai connector, and switch back restores
 
   const back = box.run(['switch', 'a', '--project', project])
   assert.equal(back.connector, 'restored')
-  // `{}` is not a setting — removing the only key removes the file rather than
+  // `{}` is not a setting. Removing the only key removes the file rather than
   // leaving a meaningless one in the user's repo forever.
   assert.equal(existsSync(settings), false)
 })
@@ -604,7 +604,7 @@ test('activate reads .wicked-webflow, and it outranks plugin state', (t) => {
 
 test('activate never fails the session, whatever it finds', (t) => {
   // It runs on every single session start. A corrupt config, an unreadable
-  // state file, or a directory nobody has ever opened must all exit 0 — a hook
+  // state file, or a directory nobody has ever opened must all exit 0. A hook
   // that blocks a session is worse than one that does nothing.
   const box = sandbox(t)
   writeFileSync(join(box.base, 'claude.json'), '{ not json')
@@ -708,13 +708,13 @@ function drive(state, keys) {
 const char = (c) => ({ name: 'char', char: c })
 
 test('decodeKey reads arrows as whole escape sequences', () => {
-  // The load-bearing detail: a Down arrow arrives as ONE 3-byte read, so a
+  // This only works because a Down arrow arrives as ONE 3-byte read, so a
   // lone 0x1b is unambiguously Escape and no disambiguation timer is needed.
   assert.deepEqual(decodeKey([0x1b, 0x5b, 0x41]), { name: 'up' })
   assert.deepEqual(decodeKey([0x1b, 0x5b, 0x42]), { name: 'down' })
   assert.deepEqual(decodeKey([0x1b]), { name: 'esc' })
 
-  // Application-cursor mode (ESC O A) is not exotic — tmux copy-mode, less,
+  // Application-cursor mode (ESC O A) is not exotic. tmux copy-mode, less,
   // and some ssh sessions all produce it.
   assert.deepEqual(decodeKey([0x1b, 0x4f, 0x41]), { name: 'up' })
 })
@@ -852,8 +852,8 @@ const ROW = (over = {}) => ({
 })
 
 test('verify pre-selects the cheap correct set, not everything', () => {
-  // The whole cost fix: a bare interactive `verify` must not re-buy results it
-  // already has. Fresh rows arrive unticked.
+  // A bare interactive `verify` must not re-buy results it already has.
+  // Fresh rows arrive unticked.
   const now = Date.parse('2026-08-15T00:00:00Z')
   const plan = verifyPlan([
     ROW({ server: 'fresh', verifiedAt: '2026-08-14T00:00:00Z' }),
@@ -970,7 +970,7 @@ test('bin/wwm imports nothing npm would have to install', () => {
   // The plugin ships as a bare git clone with no node_modules, and
   // hooks/hooks.json runs this file on every SessionStart. A dependency here
   // is an unresolved-module crash before main(), which breaks every plugin
-  // user's sessions — including the never-fatal activate hook. See
+  // user's sessions, including the never-fatal activate hook. See
   // internal/INTERACTIVE-UX.md.
   const source = readFileSync(WWM, 'utf8')
   const specifiers = [...source.matchAll(/^import\s[^'"]*from\s+['"]([^'"]+)['"]/gm)].map((m) => m[1])

@@ -29,7 +29,7 @@ const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z-.]+)?$/
  */
 const JSON_VERSION = /("version"\s*:\s*")(\d+\.\d+\.\d+(?:-[0-9A-Za-z-.]+)?)(")/g
 
-/** The `version = "..."` inside Cargo's `[package]` table only — never a dependency's. */
+/** The `version = "..."` inside Cargo's `[package]` table only, never a dependency's. */
 function cargoPackageVersion(src, replacement) {
   const start = src.search(/^\[package\]$/m)
   if (start === -1) throw new Error('no [package] table')
@@ -51,7 +51,7 @@ const TARGETS = [
   { file: '.claude-plugin/plugin.json', kind: 'json' },
   { file: '.claude-plugin/marketplace.json', kind: 'json' },
   // Optional so the CLI half of the repo still releases if app/ is ever split
-  // out. Skips are printed, never silent — a typo'd path must not read as OK.
+  // out. Skips are printed, never silent. A typo'd path must not read as OK.
   { file: 'app/src-tauri/Cargo.toml', kind: 'cargo', optional: true },
   { file: 'app/src-tauri/tauri.conf.json', kind: 'json', optional: true },
 ]
@@ -142,7 +142,7 @@ const DMG_DIR = join(ROOT, 'app/src-tauri/target/release/bundle/dmg')
 
 /**
  * Publish the locally built .dmg as a GitHub Release tagged v<version>.
- * Does not stamp or commit — `check` must already pass, and `npm run app:build`
+ * Does not stamp or commit. `check` must already pass, and `npm run app:build`
  * must already have produced the artifact.
  */
 function github() {

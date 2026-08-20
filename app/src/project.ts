@@ -39,7 +39,7 @@ function save(next: Projects): Projects {
   try {
     localStorage.setItem(KEY, JSON.stringify(next))
   } catch {
-    /* private mode, quota — the session still works, it just will not persist */
+    /* private mode, quota. The session still works, it just will not persist */
   }
   return next
 }
@@ -68,7 +68,7 @@ export async function pick(startAt: string | null): Promise<string | null> {
     directory: true,
     multiple: false,
     title: 'Choose a project folder',
-    // Spread rather than `?? undefined`: under exactOptionalPropertyTypes an
+    // Spread rather than `?? undefined`. Under exactOptionalPropertyTypes an
     // explicit undefined is not the same as an absent key.
     ...(startAt ? { defaultPath: startAt } : {}),
   })

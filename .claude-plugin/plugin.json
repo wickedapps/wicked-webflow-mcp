@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "wwm",
   "displayName": "Wicked Webflow MCP",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "description": "Keep every client's Webflow MCP connection live at once, and load only the ones each project needs.",
   "author": { "name": "Wicked Apps", "url": "https://github.com/wickedapps" },
   "repository": "https://github.com/wickedapps/wicked-webflow-mcp",

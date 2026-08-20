@@ -16,13 +16,13 @@ export interface ServerRow {
   label: string
   health: Health
   statusText: string
-  /** Site display names from the last successful verify. `null` means never verified — not "verified and empty". */
+  /** Site display names from the last successful verify. `null` means never verified, not "verified and empty". */
   sites: string[] | null
   workspaceIds: string[]
   singleSite: boolean | null
   verifiedAt: string | null
   verifyFailed: boolean
-  /** Read from disabledMcpServers, not from `mcp list` — a disabled server still reports Connected. */
+  /** Read from disabledMcpServers, not from `mcp list`. A disabled server still reports Connected. */
   active: boolean
 }
 
@@ -210,9 +210,9 @@ export const usesPinnedBin = (located: Located | null): boolean =>
 /**
  * The CLI shipped inside the app, rather than installed by the user.
  *
- * Both this and `WWM_BIN` are "pinned" — neither can be fixed by installing
- * from npm — but they fail for opposite reasons and cannot share a message:
- * a stale `WWM_BIN` is a checkout the user chose and must repoint, whereas a
+ * Both this and `WWM_BIN` are "pinned". Neither can be fixed by installing
+ * from npm, but they fail for opposite reasons and cannot share a message.
+ * A stale `WWM_BIN` is a checkout the user chose and must repoint, whereas a
  * bundled copy that will not run is almost always a missing Node.
  */
 export const usesBundledBin = (located: Located | null): boolean =>
