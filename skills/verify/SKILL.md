@@ -27,6 +27,8 @@ What a connection reaches is decided by the user's ticks on Webflow's consent sc
 
 **A connection reaching several sites is normal.** Webflow's picker is multi-select by design, and authorizing a client's five sites — or a whole group — in one grant is a deliberate, common thing to do. Do not call it over-scoped, do not warn about it, and do not offer to re-authorize unless the user says the list is wrong. `singleSite` is available if you need the fact; it is not a grade.
 
+**When the user does say the list is wrong**, that is `/wwm:reauth` — same name, new grant. Tell them the new grant replaces the old one rather than editing it, so a connection that needs one more site has to re-tick the sites it already has.
+
 The one useful question is whether these are the sites they *meant*. Ask it once, plainly, and only when there is something to notice — a site name unrelated to the client, or a list much longer than the conversation implied. If the user already told you which sites they authorized, say the result matches and move on.
 
 **`ok: false`** — could not verify. Report the `reason` and stop. **This is not a pass.** Common causes, in order of likelihood:

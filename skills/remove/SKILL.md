@@ -13,6 +13,8 @@ Permanently remove "$ARGUMENTS" and destroy its Webflow authorization.
 
 If the user said anything like "unload", "turn off for now", "switch to another client", or "I'll come back to this one" — they want `/wwm:switch`, not this. Ask before proceeding. The cost of a wrong guess is asymmetric: a needless switch costs nothing, a needless remove costs a browser round-trip and the connection's verification history.
 
+If they want the connection pointed at different sites, at another workspace, or a grant that has died — they want `/wwm:reauth`, not this. It keeps the name and replaces only the grant, so removing and re-adding is a longer road to the same place that also throws away the verification history.
+
 Proceed when the engagement is genuinely over, or the connection was created by mistake.
 
 ## Steps

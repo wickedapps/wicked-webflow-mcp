@@ -23,6 +23,7 @@ import {
   dashboardProblems,
   decodeKey,
   describeVerification,
+  diffSites,
   formatSites,
   initPicker,
   isMainPath,
@@ -36,6 +37,7 @@ import {
   verifyCost,
   verifyPlan,
   parseHealth,
+  reauthReport,
   parseMcpGet,
   parseMcpList,
   parsePersistedOutput,
@@ -945,7 +947,7 @@ test('the menu is derived from state, and never offers Status', () => {
   assert.deepEqual(empty.map((i) => i.id), ['connect', 'doctor'])
 
   const full = menuItems({ rows: [ROW()], problems: [] })
-  assert.deepEqual(full.map((i) => i.id), ['switch', 'connect', 'verify', 'remove', 'doctor'])
+  assert.deepEqual(full.map((i) => i.id), ['switch', 'connect', 'verify', 'reauth', 'remove', 'doctor'])
   assert.ok(!full.some((i) => i.id === 'status'), 'the dashboard above the menu is status')
 })
 
@@ -960,6 +962,53 @@ test('describeVerification does not spend width repeating the age column', () =>
   assert.equal(describeVerification(ROW({ sites: ['A', 'B'] })), '2 sites — A, B')
   assert.equal(describeVerification(ROW({ sites: null })), 'never checked')
   assert.equal(describeVerification(ROW({ sites: null, verifyFailed: true })), 'last check failed')
+})
+
+// ---------------------------------------------------------------------------
+// reauthorization
+// ---------------------------------------------------------------------------
+
+test('diffSites names what a reauthorization added and dropped', () => {
+  const d = diffSites(['A', 'B'], ['B', 'C'])
+  assert.deepEqual(d.added, ['C'])
+  assert.deepEqual(d.removed, ['A'])
+  assert.equal(d.same, false)
+  assert.equal(d.unknown, false)
+})
+
+test('diffSites treats order and duplicates as noise, not as change', () => {
+  const d = diffSites(['B', 'A'], ['A', 'B', 'B'])
+  assert.equal(d.same, true)
+  assert.deepEqual(d.sites, ['A', 'B'])
+})
+
+test('diffSites does not claim every site was added when the old grant was never checked', () => {
+  // The dangerous confusion: "we never looked at the old grant" is not "the old
+  // grant reached nothing". Reporting `added: [everything]` would tell someone
+  // their reauthorization widened a scope when it may have narrowed it.
+  const d = diffSites(null, ['A'])
+  assert.equal(d.unknown, true)
+  assert.equal(d.same, false)
+  assert.deepEqual(d.removed, [])
+})
+
+test('an unchanged site list after a reauthorization is reported, not swallowed', () => {
+  // The whole point of reauthorizing is usually to change the list. Coming back
+  // with the same one is a real outcome with a known cause, and reporting only
+  // the site names would let someone believe they had changed something.
+  const lines = reauthReport(diffSites(['A'], ['A']), 'wf-x').join('\n')
+  assert.match(lines, /same list as before/)
+  assert.match(lines, /app settings/, 'must say where to revoke so the picker is shown again')
+
+  const changed = reauthReport(diffSites(['A'], ['B']), 'wf-x').join('\n')
+  assert.doesNotMatch(changed, /same list/)
+  assert.match(changed, /added:\s+B/)
+  assert.match(changed, /dropped:\s+A/)
+})
+
+test('reauthReport says nothing when there is no before to compare against', () => {
+  assert.deepEqual(reauthReport(diffSites(null, ['A']), 'wf-x'), [])
+  assert.deepEqual(reauthReport(null, 'wf-x'), [])
 })
 
 // ---------------------------------------------------------------------------

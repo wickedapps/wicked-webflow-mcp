@@ -1,6 +1,6 @@
 {
   "name": "wicked-webflow-mcp",
-  "version": "0.6.3",
+  "version": "0.7.0",
   "description": "Keep every client's Webflow MCP connection live at once, and load only the ones each project needs.",
   "type": "module",
   "bin": {

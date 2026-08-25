@@ -22,6 +22,8 @@ The Claude Code plugin and the CLI are documented in the [root README](../README
 
 That is the app's job. Everything else here — the status table, the active toggles, verify — is a convenience over `wwm <cmd> --json` and duplicates what the interactive `wwm` dashboard already does in a terminal.
 
+Reauthorizing is the same constraint twice over, and it is where owning a pty stops being a convenience. Replacing a connection's grant means `claude mcp logout` *then* `claude mcp login` — the logout is what deletes the registered OAuth client, so the next login arrives as a first-time client and Webflow shows its site picker rather than approving the grant it already has on file. In a session the agent can do neither half, so `wwm reauth` there only hands back the two commands. Here, the app calls `wwm reauth --revoke-only` for the first half and drives the second on the pty, which is the whole flow without a terminal. It needed no new Rust: `pty.rs` already runs `claude mcp login <server>`, and that is still all it runs.
+
 ## Architecture
 
 ```

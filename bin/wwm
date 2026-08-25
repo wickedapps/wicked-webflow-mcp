@@ -25,7 +25,7 @@ export const PLUGIN_ID = 'wicked-webflow-mcp'
 // npm ships only this file, so the version cannot be read from package.json.
 // Bump in lockstep with package.json, plugin.json, and marketplace.json.
 // `node scripts/release.mjs stamp <version>` does all of them at once.
-export const VERSION = '0.6.3'
+export const VERSION = '0.7.0'
 
 /**
  * The shape of `--json` output, versioned independently of VERSION.
@@ -715,6 +715,24 @@ export function describeVerification(row) {
 }
 
 /**
+ * What changed between the site list a connection used to reach and the one it
+ * reaches now. Pure so the reauth report can be exercised without a browser.
+ *
+ * `before === null` means "we never checked the old grant", which is NOT the
+ * same as "the old grant reached nothing". It comes back as `unknown: true` so
+ * the caller reports the new list plainly instead of inventing a diff against
+ * an empty set and claiming every site was added.
+ */
+export function diffSites(before, after) {
+  const now = [...new Set(Array.isArray(after) ? after : [])].sort()
+  if (!Array.isArray(before)) return { unknown: true, added: now, removed: [], same: false, sites: now }
+  const was = [...new Set(before)].sort()
+  const added = now.filter((s) => !was.includes(s))
+  const removed = was.filter((s) => !now.includes(s))
+  return { unknown: false, added, removed, same: added.length === 0 && removed.length === 0, sites: now }
+}
+
+/**
  * What the dashboard should lead with, most actionable first.
  *
  * A menu that lists capabilities in a fixed order makes the user do the
@@ -766,6 +784,13 @@ export function menuItems({ rows = [], problems = [] } = {}) {
   items.push({ id: 'connect', label: 'Connect a new client' })
   if (rows.length) {
     items.push({ id: 'verify', label: 'Verify what a connection can reach' })
+    // A standing row rather than a `needs_auth` problem row, and not because
+    // reauth is a routine action — because dashboardProblems is computed before
+    // health lands (see cmdMenu) and must never read it. A fix row that
+    // appeared when the list arrived would move under the user's cursor. The
+    // per-row `⚠ needs auth` on the dashboard is where a dead grant is
+    // reported; this is the row that acts on it.
+    items.push({ id: 'reauth', label: 'Reauthorize a connection' })
     items.push({ id: 'remove', label: 'Remove a connection' })
   }
   items.push({ id: 'doctor', label: 'Doctor' })
@@ -1883,10 +1908,14 @@ function cmdConnect(args) {
       const candidate = `${name}-${i}`
       if (!listed.servers.some((s) => s.name === candidate)) { suggestion = candidate; break }
     }
+    // `wwm reauth` leads, because "connect the client I already have" almost
+    // always means "point it somewhere else", and reaching that by removing and
+    // re-adding costs a browser round-trip and the verification history for a
+    // result reauth reaches directly.
     throw new Fail(
       EXIT.COLLISION,
       `A server named "${name}" already exists.`,
-      `Reuse it as-is, remove it with \`wwm remove ${slug}\`, or pick another name${suggestion ? ` (e.g. \`wwm connect ${suggestion.slice(prefix().length)}\`)` : ''}.`
+      `Reuse it as-is, point it at different sites with \`wwm reauth ${slug}\`, remove it with \`wwm remove ${slug}\`, or pick another name${suggestion ? ` (e.g. \`wwm connect ${suggestion.slice(prefix().length)}\`)` : ''}.`
     )
   }
 
@@ -2062,6 +2091,339 @@ function rollbackConnect(name) {
     saveState(state)
   } catch { /* best effort */ }
   return out.join(', ')
+}
+
+const REAUTH_USAGE = `Usage: wwm reauth [<slug>] [--print-command] [--revoke-only] [--no-browser] [--no-verify --yes]
+
+  Replace the grant behind a connection without changing its name.
+
+  --print-command  hand back the two commands, change nothing (the agent path)
+  --revoke-only    drop the old grant and stop, leaving the login to a caller
+                   that owns a terminal (the desktop app's path)`
+
+/**
+ * Reauthorize a connection in place: same server name, same URL, new grant.
+ *
+ * Why this is `logout` AND `login` rather than just `login`. Measured against
+ * Claude Code 2.1.231 by reading its own implementation:
+ *
+ *   - `claude mcp login <name>` already revokes the stored tokens itself before
+ *     it opens the browser, but it does so with `preserveStepUpState`, which
+ *     KEEPS the record's `clientId`, `redirectUri` and `clientSecret`. The new
+ *     flow then re-presents the same dynamically-registered OAuth client.
+ *   - `claude mcp logout <name>` revokes with no such option, and that path
+ *     deletes the whole `mcpOAuth` record — `clientId` included.
+ *
+ * So logging out first is what makes the next login a first-time login from
+ * Webflow's point of view: a fresh client registration rather than a returning
+ * one. That is the difference between being shown the site picker again and
+ * being waved through on the grant that is already on file, which matters
+ * because changing what a connection reaches is the entire point of this
+ * command. Webflow's own docs are blunt about the constraint being real:
+ * "To access different workspaces, you must re-authenticate".
+ *
+ * Be clear about which half of that is measured. That logout deletes the client
+ * registration and login preserves it is read straight out of Claude Code and is
+ * a fact. That Webflow auto-approves a returning `client_id` without showing the
+ * picker is an inference from it, and has NOT been confirmed against Webflow's
+ * authorization server. Logout-first is the safe order either way, and the
+ * "same list as before" report exists to catch it if the inference is wrong.
+ *
+ * It is a genuine downgrade in the meantime. Between the logout and a finished
+ * browser round-trip the connection reaches nothing, and there is no undo —
+ * the old token is gone at the first step. Every path through here says so
+ * before it spends anything, and the two non-interactive paths refuse to take
+ * that step on a caller's behalf without being asked for it explicitly.
+ */
+function cmdReauth(args) {
+  requirePreflight()
+
+  const input = args.positional[0] ?? (canPrompt() ? pickConnectionToReauth() : null)
+  if (input === CANCELLED) return EXIT.OK
+  if (!input) throw new Fail(EXIT.USAGE, 'Usage: wwm reauth <slug>', REAUTH_USAGE)
+
+  const slug = slugify(input)
+  const name = input.startsWith(prefix()) ? input : serverName(slug)
+
+  // reauth is not a create path. `connect` is, and it is the one that knows how
+  // to register a server and suggest a free name. Silently doing its job here
+  // would also mean inventing a label for a client we have never heard of.
+  const listed = listServers({ refresh: true })
+  if (!listed.servers.some((s) => s.name === name)) {
+    throw new Fail(
+      EXIT.USAGE,
+      `No server named "${name}".`,
+      `reauth replaces the grant behind a connection that already exists. To create one, run \`wwm connect ${slug}\`.`
+    )
+  }
+
+  const state = loadState()
+  const conn = state.connections[name] ?? { label: name, addedAt: new Date().toISOString() }
+  const label = conn.label ?? name
+  // The old site list, kept for the before/after report. Reading it now matters:
+  // the logout below is what makes it historical.
+  //
+  // Falling back to `previousVerified` is what makes a two-step reauthorization
+  // still able to report a diff. The desktop app revokes with --revoke-only and
+  // finishes the login on its own pty; if that browser step fails and the user
+  // comes back through the CLI, `lastVerified` is already gone and this is the
+  // only remaining record of what the connection used to reach.
+  const priorVerified = conn.lastVerified?.ok ? conn.lastVerified
+    : conn.previousVerified?.ok ? conn.previousVerified
+    : null
+  const previous = priorVerified ? { sites: priorVerified.sites, at: priorVerified.at } : null
+
+  const logoutCommand = `claude mcp logout ${name}`
+  const loginCommand = `claude mcp login ${name}${args.flags['no-browser'] ? ' --no-browser' : ''}`
+
+  const payload = {
+    ok: true,
+    server: name,
+    label,
+    previous,
+    revoked: false,
+    logoutCommand: null,
+    loginCommand: null,
+    authorized: false,
+    verified: null,
+    changed: null,
+  }
+
+  // `claude mcp login` requires a TTY, so an agent shell reaching this cannot
+  // finish the job. It gets both commands and we touch nothing: a logout done
+  // here on the strength of a command someone may never paste would cost them
+  // a working connection and buy them nothing.
+  const noTty = !process.stdin.isTTY
+  if (args.flags['print-command'] || (noTty && !args.flags['revoke-only'])) {
+    payload.logoutCommand = logoutCommand
+    payload.loginCommand = loginCommand
+    if (ctx.json) { emitJson(payload); return EXIT.OK }
+
+    human('')
+    human(noTty && !args.flags['print-command']
+      ? `This shell has no TTY, so \`claude mcp login\` cannot run here. Nothing has been changed.`
+      : `Nothing has been changed yet. Run both of these in your own terminal:`)
+    human('')
+    human(`    ${logoutCommand}`)
+    human(`    ${loginCommand}`)
+    human('')
+    human(`The first drops the grant ${label} has now. Run them together — between the two,`)
+    human('the connection reaches nothing.')
+    human('')
+    human(`On Webflow's consent screen: it lists EVERY site in EVERY workspace you can reach,`)
+    human(`and it is multi-select. Tick the sites ${label} should reach FROM NOW ON — this is a`)
+    human('fresh grant, not an edit to the old one, so anything left unticked is dropped.')
+    if (previous) {
+      human('')
+      human(`It currently reaches ${describeSites(previous.sites)}.`)
+    }
+    human('')
+    human(insideClaudeSession()
+      ? `Then come back here and say "verify ${label}" — the check runs from this session.`
+      : `Then ask Claude Code to verify ${label}, or run \`wwm verify ${slug}\` if you have wwm installed.`)
+    return EXIT.OK
+  }
+
+  // The briefing is the whole value of the interactive path. After the logout
+  // there is nothing to decide and no way back, so this is the last moment at
+  // which saying any of it is useful.
+  const interactive = canPrompt() && !args.flags['revoke-only']
+  if (interactive) {
+    if (!confirmReauth(name, label, previous)) return EXIT.OK
+  } else if (!ctx.yes && !args.flags.yes) {
+    throw new Fail(
+      EXIT.USAGE,
+      `This drops ${name}'s current Webflow authorization, and there is no undo.`,
+      `${previous ? `It reaches ${describeSites(previous.sites)} today.\n` : ''}` +
+        'Re-run with --yes to proceed, or with --print-command to get the commands and run them yourself.'
+    )
+  }
+
+  const revoked = runClaude(['mcp', 'logout', name])
+  if (!revoked.dryRun && revoked.status !== 0) {
+    throw new Fail(
+      EXIT.GENERIC,
+      `Could not clear ${name}'s stored credential.`,
+      `${(revoked.stderr || revoked.stdout).trim() || 'See the output above.'}\n\n` +
+        'Nothing else was attempted; the connection is as it was.'
+    )
+  }
+  payload.revoked = !revoked.dryRun
+  if (!revoked.dryRun) human(`${sym.ok} Dropped the old grant for ${name}.`)
+
+  // The recorded site list described the grant that just went away. Leaving it
+  // in place would have `status` reporting sites next to a connection that
+  // cannot reach any of them, which is the one reading this tool must never
+  // allow. It moves to `previousVerified` so the report below can still diff.
+  const s1 = loadState()
+  const c1 = s1.connections[name] ?? conn
+  if (priorVerified) c1.previousVerified = priorVerified
+  delete c1.lastVerified
+  c1.reauthorizedAt = new Date().toISOString()
+  s1.connections[name] = c1
+  saveState(s1)
+
+  // A caller that owns a terminal of its own — the desktop app drives the login
+  // on its pty — wants the revocation done and the browser step left to it.
+  if (args.flags['revoke-only']) {
+    payload.loginCommand = loginCommand
+    if (ctx.json) { emitJson(payload); return EXIT.OK }
+    human('')
+    human(revoked.dryRun
+      ? `Dry run — nothing was revoked. The step that finishes a real one:`
+      : `${name} is now unauthorized and reaches nothing. Finish with:`)
+    human('')
+    human(`    ${loginCommand}`)
+    return EXIT.OK
+  }
+
+  human('')
+  human(`Opening Webflow's consent screen in your browser.`)
+  human(`This is a fresh grant, not an edit — tick everything ${label} should reach from now on.`)
+  human('')
+
+  const loginArgs = ['mcp', 'login', name]
+  if (args.flags['no-browser']) loginArgs.push('--no-browser')
+  const login = runClaude(loginArgs, { timeout: 300_000, interactive: true })
+
+  if (!login.dryRun && login.status !== 0) {
+    // Deliberately no rollback. There is nothing to roll back to: the old
+    // credential was destroyed by the step that succeeded. Saying so is the
+    // only honest thing available, and the fix is to run the login again —
+    // the server entry is still there, so `reauth` is not needed twice.
+    throw new Fail(
+      EXIT.GENERIC,
+      `Authorization failed for ${name}.`,
+      `${(login.stderr || login.stdout).trim() || 'See the output above.'}\n\n` +
+        `The old grant is already gone, so ${name} currently reaches nothing.\n` +
+        `Run \`${loginCommand}\` to try the browser step again — the server itself is untouched.`
+    )
+  }
+  payload.authorized = !login.dryRun
+
+  if (args.flags['no-verify']) {
+    if (!args.flags.yes && !ctx.yes) {
+      throw new Fail(EXIT.USAGE, '--no-verify requires --yes.', 'A reauthorization exists to change what a connection reaches. Skip the check and nothing has looked at whether it did.')
+    }
+    human('')
+    human(`${sym.warn} Skipped verification. Nothing has checked what this connection now reaches.`)
+    if (ctx.json) emitJson(payload)
+    return EXIT.OK
+  }
+
+  human('')
+  human('Verifying scope…')
+  const result = verifyOne(name)
+  if (result.dryRun) {
+    if (ctx.json) emitJson(payload)
+    else human(`${sym.warn} Dry run — nothing was revoked, authorized, or verified.`)
+    return EXIT.OK
+  }
+
+  const s2 = loadState()
+  recordVerification(s2, name, result)
+  saveState(s2)
+
+  if (!result.ok) {
+    payload.ok = false
+    if (ctx.json) { emitJson(payload); return EXIT.VERIFY_FAILED }
+    human(`${sym.bad} Reauthorized, but scope could not be verified: ${result.reason}`)
+    human('')
+    human(`That is "we don't know what it reaches now", not "it's fine". \`wwm verify ${slug}\` retries.`)
+    return EXIT.VERIFY_FAILED
+  }
+
+  const changed = diffSites(previous?.sites ?? null, result.sites)
+  payload.verified = {
+    sites: result.sites,
+    workspaceIds: result.workspaceIds,
+    singleSite: result.singleSite,
+    at: new Date().toISOString(),
+  }
+  payload.changed = changed
+
+  if (ctx.json) { emitJson(payload); return EXIT.OK }
+
+  human('')
+  human(`${sym.ok} Authorized for ${describeSites(result.sites)}`)
+  for (const line of reauthReport(changed, name)) human(line)
+  human('')
+  human('Its tools are available now — no restart needed.')
+
+  if (canPrompt() && !args.positional[0]) echoCommand(['reauth', slug])
+  return EXIT.OK
+}
+
+/**
+ * The before/after lines under a finished reauthorization.
+ *
+ * The one that earns its place is the `same` case. An unchanged list after a
+ * reauthorization done specifically to change the list is a real outcome with a
+ * known cause, and reporting only "Authorized for 2 sites" would let someone
+ * walk away believing they had changed something they had not.
+ */
+export function reauthReport(changed, name) {
+  const out = []
+  if (!changed || changed.unknown) return out
+
+  if (changed.same) {
+    out.push('')
+    out.push(`  ${sym.warn} That is the same list as before.`)
+    out.push('     If you meant to change it, Webflow re-approved the grant it already had on')
+    out.push(`     file rather than showing you the picker. Revoke ${name}'s authorization in`)
+    out.push(`     Webflow's own app settings, then run this again — the consent screen has`)
+    out.push('     nothing to wave through once the app is no longer authorized there.')
+    return out
+  }
+
+  if (changed.added.length) out.push(`     added:   ${changed.added.join(', ')}`)
+  if (changed.removed.length) out.push(`     dropped: ${changed.removed.join(', ')}`)
+  return out
+}
+
+/** Pick what to reauthorize, with what each connection reaches today in the list. */
+function pickConnectionToReauth() {
+  const state = loadState()
+  const owned = ownedNames(state)
+  if (owned.length === 0) throw new Fail(EXIT.USAGE, 'No wwm-managed connections to reauthorize.', 'Run `wwm connect <client>` first.')
+
+  const items = owned.map((name) => {
+    const conn = state.connections[name]
+    const v = conn?.lastVerified
+    const reach = !v ? 'never checked' : v.ok ? describeSites(v.sites) : 'last check failed'
+    return { label: name, hint: `${conn?.label ?? '—'} · ${reach}` }
+  })
+
+  const chosen = pick({ title: 'Reauthorize a connection', items })
+  if (chosen.cancelled || chosen.indexes.length === 0) return CANCELLED
+  return owned[chosen.indexes[0]]
+}
+
+/**
+ * The reauth briefing. Softer than `confirmRemoval` — the name, the label and
+ * the project activation all survive this, so a mis-click costs a browser
+ * round-trip rather than a connection — but it is still a one-way step, and
+ * the sentence that matters is that the new grant replaces rather than extends.
+ */
+function confirmReauth(name, label, previous) {
+  OUT('\n')
+  OUT(`  ${sym.warn} This drops ${name}'s current Webflow authorization and asks for a new one.\n`)
+  OUT('\n')
+  if (previous) OUT(`     Today it reaches ${describeSites(previous.sites)}.\n`)
+  OUT(`     The new grant REPLACES that. Whatever you leave unticked on Webflow's\n`)
+  OUT(`     consent screen is dropped, including sites it reaches now.\n`)
+  OUT('\n')
+  OUT(`     The name, the label, and which projects load it are all kept.\n`)
+  OUT(`     There is no undo: until the browser round-trip finishes, ${label} reaches\n`)
+  OUT('     nothing.\n')
+
+  const choice = pick({
+    items: [
+      { label: 'Cancel — leave it as it is' },
+      { label: `Reauthorize ${name}` },
+    ],
+  })
+  return !choice.cancelled && choice.indexes[0] === 1
 }
 
 /**
@@ -2349,6 +2711,7 @@ function runMenuChoice(id, snap) {
     case 'switch': return cmdSwitch(bare)
     case 'connect': return cmdConnect(bare)
     case 'verify': return cmdVerify(bare)
+    case 'reauth': return cmdReauth(bare)
     case 'remove': return cmdRemove(bare)
     case 'doctor': return cmdDoctor(bare)
     default: return EXIT.OK
@@ -2374,6 +2737,7 @@ function cmdRemove(args) {
         `This will remove ${name} and destroy its Webflow authorization.`,
         'Removing a server invalidates its stored grant everywhere — there is no way to remove it and keep the token.\n' +
           'To deactivate a connection for one project without losing the grant, use `wwm switch` instead.\n' +
+          'To point it at different sites, or to replace a grant that has died, use `wwm reauth` instead.\n' +
           `Re-run with --yes to proceed.`
       )
     }
@@ -2445,14 +2809,21 @@ function confirmRemoval(name) {
   OUT('\n')
   OUT(`     If you only want it out of this project, switch does that and\n`)
   OUT(`     keeps the authorization.\n`)
+  OUT(`     If you want it pointed at different sites, reauth replaces the grant\n`)
+  OUT(`     and keeps the connection.\n`)
 
+  // Both of the cheaper intents get a row, because both are things people reach
+  // for remove to do. The destructive option stays last and is the only one that
+  // then asks for the name.
+  const REMOVE = 2
   const choice = pick({
     items: [
       { label: 'Go back and use switch instead' },
+      { label: 'Go back and use reauth instead' },
       { label: `Remove ${name} permanently` },
     ],
   })
-  if (choice.cancelled || choice.indexes[0] !== 1) return false
+  if (choice.cancelled || choice.indexes[0] !== REMOVE) return false
 
   const typed = askText(`Type ${name} to confirm`, {
     validate: (v) => (v.trim() === name ? null : `does not match ${name}`),
@@ -2919,6 +3290,7 @@ const USAGE = `wwm — per-client Webflow MCP connections for Claude Code
   wwm switch [<slug>...]   set the connections active in this project
                            (--all | --none | --default | --write to commit the set)
   wwm activate --for-cwd   apply this project's set (the SessionStart hook)
+  wwm reauth [<slug>]      replace a connection's grant, same name (asks if no slug)
   wwm remove <slug>        logout + remove (destroys the grant)
   wwm doctor               preflight checks
   wwm version              print this binary's version
@@ -2967,6 +3339,7 @@ function main(argv) {
     case 'connect': return cmdConnect(parsed)
     case 'verify': return cmdVerify(parsed)
     case 'status': return cmdStatus(parsed)
+    case 'reauth': return cmdReauth(parsed)
     case 'remove': return cmdRemove(parsed)
     case 'switch': return cmdSwitch(parsed)
     case 'activate': return cmdActivate(parsed)

@@ -8,11 +8,17 @@ import { useEffect, useRef, useState } from 'react'
 interface Props {
   server: string
   label: string
+  /**
+   * The old grant was already revoked on the way in, so the consent screen is
+   * replacing one rather than issuing the first. Copy only — the pty runs the
+   * same `claude mcp login` either way.
+   */
+  reauth?: boolean
   onExit: (code: number) => void
   onClose: () => void
 }
 
-export function LoginTerminal({ server, label, onExit, onClose }: Props) {
+export function LoginTerminal({ server, label, reauth = false, onExit, onClose }: Props) {
   const host = useRef<HTMLDivElement>(null)
   const [exited, setExited] = useState<number | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -131,12 +137,26 @@ export function LoginTerminal({ server, label, onExit, onClose }: Props) {
       <div className="sheet-card login">
         <header>
           <div>
-            <h2>Authorize {label}</h2>
+            <h2>
+              {reauth ? 'Reauthorize' : 'Authorize'} {label}
+            </h2>
             <p className="muted">
               Webflow&rsquo;s consent screen lists every site in every workspace you can reach, and
-              it is multi&#8209;select. Tick only {label}&rsquo;s site or sites &mdash; that
-              selection is what this connection will be able to read. Do not tick the workspace row
-              above them unless you mean the whole workspace.
+              it is multi&#8209;select.{' '}
+              {reauth ? (
+                <>
+                  This grant replaces the one {label} had rather than extending it, so tick every
+                  site it should reach from now on &mdash; anything left unticked is dropped,
+                  including sites it reached until a moment ago. Until this finishes it reaches
+                  nothing.
+                </>
+              ) : (
+                <>
+                  Tick only {label}&rsquo;s site or sites &mdash; that selection is what this
+                  connection will be able to read.
+                </>
+              )}{' '}
+              Do not tick the workspace row above them unless you mean the whole workspace.
             </p>
           </div>
         </header>
