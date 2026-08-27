@@ -2,13 +2,14 @@
 //! check. A desktop process is the only one here that can open a pty.
 
 use std::io::{Read, Write};
+use std::path::Path;
 use std::sync::Mutex;
 
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
-use crate::wwm;
+use crate::{deps, wwm};
 
 pub struct Session {
     /// Chosen by the caller, so it can tell its own session's events from
@@ -32,6 +33,15 @@ struct Output {
 struct Exit {
     id: String,
     code: i32,
+}
+
+fn login_command(claude: &Path, server: &str, no_browser: bool) -> CommandBuilder {
+    let mut cmd = CommandBuilder::new(claude);
+    cmd.args(["mcp", "login", server]);
+    if no_browser {
+        cmd.arg("--no-browser");
+    }
+    cmd
 }
 
 /// Spawn `claude mcp login <server>` on a pty.
@@ -69,11 +79,16 @@ pub fn login_start(
         })
         .map_err(|e| format!("could not open a pty: {e}"))?;
 
-    let mut cmd = CommandBuilder::new("claude");
-    cmd.args(["mcp", "login", &server]);
-    if no_browser {
-        cmd.arg("--no-browser");
-    }
+    // The prerequisite check may have found Claude in a fallback such as
+    // ~/.local/bin even though that directory is absent from a Finder-launched
+    // app's PATH. Reuse the resolved executable instead of doing a second,
+    // narrower lookup inside the pty.
+    let claude = deps::claude_bin().ok_or_else(|| {
+        format!(
+            "could not start `claude mcp login {server}`: Claude Code is no longer installed at a known path"
+        )
+    })?;
+    let mut cmd = login_command(&claude, &server, no_browser);
     // Same PATH problem as the CLI bridge. A Finder-launched GUI cannot see a
     // node installed through nvm, and `claude` usually lives beside it.
     if let Some(path) = wwm::resolved_path() {
@@ -189,5 +204,37 @@ pub fn login_close(state: State<'_, LoginState>, id: String) -> Result<(), Strin
 fn close_locked(guard: &mut Option<Session>) {
     if let Some(mut session) = guard.take() {
         let _ = session.killer.kill();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::{OsStr, OsString};
+
+    #[test]
+    fn login_uses_the_resolved_claude_executable() {
+        let claude = Path::new("/Users/example/.local/bin/claude");
+        let cmd = login_command(claude, "wf-example", false);
+
+        assert_eq!(
+            cmd.get_argv(),
+            &[
+                OsString::from("/Users/example/.local/bin/claude"),
+                OsString::from("mcp"),
+                OsString::from("login"),
+                OsString::from("wf-example"),
+            ]
+        );
+    }
+
+    #[test]
+    fn login_keeps_no_browser_after_the_server() {
+        let cmd = login_command(Path::new("/opt/homebrew/bin/claude"), "wf-example", true);
+
+        assert_eq!(
+            cmd.get_argv().last().map(OsString::as_os_str),
+            Some(OsStr::new("--no-browser"))
+        );
     }
 }
