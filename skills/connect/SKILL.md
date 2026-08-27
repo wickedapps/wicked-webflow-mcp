@@ -9,6 +9,8 @@ Connect the client named "$ARGUMENTS" as its own named Webflow MCP connection.
 
 **If "$ARGUMENTS" is empty, the user invoked this with no client name.** Ask for it and stop — do not guess one from the directory name or from existing connections. Everything below depends on knowing which client this is, including the consent-screen briefing, which names the site they should tick.
 
+**If the connection already exists**, `wwm connect` exits `4` rather than touching it. Someone reconnecting a client they already have almost always wants a different grant under the same name, which is `/wwm:reauth`. Check that before offering to remove anything.
+
 ## What you can and cannot do from here
 
 **You can run every `wwm` command except `connect`'s browser step.** `wwm` is on your `PATH` in this session. `wwm verify` and `wwm status` are headless and work fine — run them yourself.

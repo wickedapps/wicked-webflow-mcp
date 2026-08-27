@@ -249,6 +249,89 @@ test('remove', (t) => {
   assert.ok(Array.isArray(out.steps))
 })
 
+/** Every reauth path emits one key set, so all of them are pinned by one list. */
+const REAUTH_KEYS = [
+  'schemaVersion',
+  'ok',
+  'server',
+  'label',
+  'previous',
+  'revoked',
+  'logoutCommand',
+  'loginCommand',
+  'authorized',
+  'verified',
+  'changed',
+]
+
+test('reauth, which without a TTY hands back the commands and changes nothing', (t) => {
+  const box = sandbox(t)
+  const out = box.run(['reauth', 'example'])
+
+  keys(out, REAUTH_KEYS, 'reauth (print-command)')
+  // The load-bearing assertion. An agent shell cannot run `claude mcp login`,
+  // so if this path ever starts revoking on its own it destroys a working
+  // grant on the strength of a command the user may never paste.
+  assert.equal(out.revoked, false)
+  assert.equal(out.authorized, false)
+  assert.equal(out.logoutCommand, 'claude mcp logout wf-example')
+  assert.equal(out.loginCommand, 'claude mcp login wf-example')
+  assert.equal(out.verified, null)
+  assert.equal(out.changed, null)
+})
+
+test('reauth --revoke-only drops the grant and stops, for a caller that owns a terminal', (t) => {
+  const box = sandbox(t)
+  const out = box.run(['reauth', 'example', '--revoke-only', '--yes'])
+
+  keys(out, REAUTH_KEYS, 'reauth (revoke-only)')
+  assert.equal(out.revoked, true)
+  assert.equal(out.authorized, false, 'revoking is not authorizing')
+  assert.equal(out.loginCommand, 'claude mcp login wf-example')
+  assert.equal(out.logoutCommand, null, 'the logout already happened; handing it back would invite a second one')
+})
+
+test('reauth --revoke-only refuses without --yes, because there is no undo', (t) => {
+  const box = sandbox(t)
+  const out = box.run(['reauth', 'example', '--revoke-only'])
+  assert.equal(out.ok, false)
+  assert.equal(out.exitCode, 2)
+})
+
+test('reauth clears the recorded site list, so status cannot report a dead grant as reach', (t) => {
+  // A connection whose grant was just revoked must not keep reporting the sites
+  // that grant used to cover. "needs auth" next to a list of two sites reads to
+  // a skimming human as "reaches two sites".
+  const box = sandbox(t, {
+    connections: ['wf-example'],
+    verifyTranscript: readFileSync(join(FIXTURES, 'verify-two-sites.jsonl'), 'utf8'),
+  })
+  const verified = box.run(['verify', 'example'])
+  assert.deepEqual(verified.results[0].sites, ['Example Site', 'Example Staging'])
+
+  const out = box.run(['reauth', 'example', '--revoke-only', '--yes'])
+  assert.deepEqual(out.previous.sites, ['Example Site', 'Example Staging'], 'the old list survives as history')
+
+  const after = box.run(['status', '--project', box.project])
+  const row = after.servers.find((s) => s.server === 'wf-example')
+  assert.equal(row.sites, null, 'the revoked grant is not still reported as reach')
+  assert.equal(row.verifiedAt, null)
+
+  // A second reauth over an already-revoked connection can still say what it
+  // used to reach. This is the path a failed browser step leaves behind, and
+  // losing the before-list is what would make the next diff meaningless.
+  const again = box.run(['reauth', 'example', '--revoke-only', '--yes'])
+  assert.deepEqual(again.previous.sites, ['Example Site', 'Example Staging'])
+})
+
+test('reauth refuses a server that does not exist, rather than creating one', (t) => {
+  const box = sandbox(t, { connections: [] })
+  const out = box.run(['reauth', 'nosuchclient'])
+  assert.equal(out.ok, false)
+  assert.equal(out.exitCode, 2)
+  assert.match(out.detail, /wwm connect nosuchclient/)
+})
+
 test('activate — the SessionStart hook, which must stay exit 0 and parseable', (t) => {
   const box = sandbox(t)
   const out = box.run(['activate', '--project', box.project])

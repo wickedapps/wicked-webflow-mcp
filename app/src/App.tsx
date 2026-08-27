@@ -1,6 +1,7 @@
 import { Suspense, lazy, useCallback, useEffect, useState, type ReactNode } from 'react'
 
 import { AddClient } from './AddClient'
+import { ConfirmReauth } from './ConfirmReauth'
 import { ConfirmRemove } from './ConfirmRemove'
 import { ProjectBar } from './ProjectBar'
 import * as projects from './project'
@@ -412,6 +413,24 @@ function applySwitch(data: wwm.StatusResult, res: wwm.SwitchResult): wwm.StatusR
   }
 }
 
+/**
+ * `diffSites` in bin/wwm, reduced to the one question the app asks.
+ *
+ * Both sides are sorted and deduped first: order and repeats come from
+ * whatever the API happened to return and never carry meaning, so treating
+ * them as a change would invent one.
+ *
+ * A null on either side is that function's `unknown` — never verified before,
+ * or a verify that just failed. Neither is evidence that nothing changed, and
+ * "we don't know" must never be reported as a finding, so both answer false.
+ */
+function sameSites(before: string[] | null, after: string[] | null): boolean {
+  if (before === null || after === null) return false
+  const was = [...new Set(before)].sort()
+  const now = [...new Set(after)].sort()
+  return was.length === now.length && was.every((site, i) => site === now[i])
+}
+
 function ListWrap({ status, children }: { status: string | null; children: ReactNode }) {
   return (
     <div className={`cards${status ? ' loading' : ''}`} aria-busy={status !== null}>
@@ -433,9 +452,33 @@ export default function App() {
   const [data, setData] = useState<wwm.StatusResult | null>(null)
   const [error, setError] = useState<AppError | null>(null)
   const [busy, setBusy] = useState<string | null>('Loading')
-  const [login, setLogin] = useState<{ server: string; label: string } | null>(null)
+  const [login, setLogin] = useState<{
+    server: string
+    label: string
+    /** The old grant was dropped on the way here, so the sheet says so. */
+    reauth?: boolean
+  } | null>(null)
   const [adding, setAdding] = useState(false)
   const [removing, setRemoving] = useState<{ server: string; label: string } | null>(null)
+  // Carries the site list off the card so the confirmation can name what is
+  // about to be given up; after the revoke it is gone from state.json.
+  const [reauthing, setReauthing] = useState<{
+    server: string
+    label: string
+    sites: string[] | null
+  } | null>(null)
+  /**
+   * A reauthorization waiting to be judged, held apart from `login` because
+   * the judging happens after the login sheet's auto-verify, which can land
+   * after the sheet is gone. `previous` is the site list the dropped grant
+   * reached, captured before the CLI erased it from state.json.
+   */
+  const [reauthWatch, setReauthWatch] = useState<{
+    server: string
+    label: string
+    previous: string[]
+  } | null>(null)
+  const [reauthNote, setReauthNote] = useState<{ server: string; label: string } | null>(null)
   const [store, setStore] = useState<projects.Projects>(() => projects.load())
   const [pending, setPending] = useState<string | null>(null)
 
@@ -443,6 +486,7 @@ export default function App() {
 
   const refresh = useCallback(async (dir: wwm.Project, hard = false) => {
     setBusy('Loading')
+    setReauthNote(null)
     try {
       setData(await wwm.status(dir, hard))
       setError(null)
@@ -518,7 +562,22 @@ export default function App() {
       setError(caught(e))
     }
     try {
-      setData(await wwm.status(project, false))
+      const next = await wwm.status(project, false)
+      setData(next)
+      // The reauthorization is not finished until something has looked at what
+      // it changed, and this row is the first honest reading of the new grant.
+      // Comparing the re-read row beats parsing the verify payload: this is
+      // the same list the card is about to show.
+      if (reauthWatch?.server === server) {
+        const row = next.servers.find((s) => s.server === server)
+        if (sameSites(reauthWatch.previous, row?.sites ?? null)) {
+          setReauthNote({ server, label: row?.label ?? reauthWatch.label })
+        }
+        // Cleared whichever way it went. Only the verify that follows the
+        // reauthorization is measuring it; a Verify clicked next week would be
+        // comparing the current grant against a list it has no bearing on.
+        setReauthWatch(null)
+      }
     } catch (e) {
       setError(caught(e))
     } finally {
@@ -536,6 +595,10 @@ export default function App() {
   const useProject = async (dir: string) => {
     setPending(dir)
     setBusy('Loading')
+    // Another folder is another context; a finding about the last one has no
+    // business surviving the switch, and neither has a comparison it owns.
+    setReauthNote(null)
+    setReauthWatch(null)
     try {
       const next = await wwm.status(dir, false)
       setData(next)
@@ -665,6 +728,58 @@ export default function App() {
     })()
   }
 
+  /**
+   * Revoke, correct the card, and go straight to the pty.
+   *
+   * `wwm reauth --revoke-only` has already run the logout and cleared the
+   * recorded site list by the time this resolves, so the row is spliced rather
+   * than reread: a status reread would health-check every server to learn a
+   * change we already know exactly. Opening the login sheet is not a courtesy
+   * either. Until the browser round-trip finishes the connection reaches
+   * nothing, and there is no state left to roll back to.
+   */
+  const confirmReauth = () => {
+    if (!reauthing) return
+    const { server, label } = reauthing
+    void (async () => {
+      setBusy('Reauthorizing')
+      try {
+        const res = await wwm.reauth(project, server)
+        setData((cur) =>
+          cur
+            ? {
+                ...cur,
+                servers: cur.servers.map((row) =>
+                  row.server === server
+                    ? {
+                        ...row,
+                        health: 'needs_auth',
+                        statusText: 'Needs authentication',
+                        sites: null,
+                        verifiedAt: null,
+                        verifyFailed: false,
+                      }
+                    : row,
+                ),
+              }
+            : cur,
+        )
+        setError(null)
+        setReauthing(null)
+        // `previous` is null when the old grant was never verified. With
+        // nothing trustworthy to compare the new one against, arm nothing:
+        // silence is correct where a comparison cannot be made.
+        setReauthWatch(res.previous ? { server, label, previous: res.previous.sites } : null)
+        setReauthNote(null)
+        setLogin({ server, label, reauth: true })
+      } catch (e) {
+        setError(caught(e))
+      } finally {
+        setBusy(null)
+      }
+    })()
+  }
+
   const notices = describeNotices(deps, located, error)
   const setup = notices.length > 0
 
@@ -752,6 +867,23 @@ export default function App() {
               </button>
             </div>
           </div>
+          {/*
+            * The one outcome of a reauthorization nobody can see for
+            * themselves. The card shows a site list either way, so an
+            * unchanged one looks exactly like a successful change.
+            */}
+          {reauthNote && (
+            <p className="warn-banner">
+              {reauthNote.label} came back with the same sites it had before. Webflow approved the
+              authorization already on file instead of showing you the picker, so its reach did not
+              change. To get the picker, remove this app from the authorized apps for that workspace
+              in Webflow&rsquo;s own settings, then reauthorize &mdash; with nothing on file there is
+              nothing to wave through.{' '}
+              <button className="ghost" onClick={() => setReauthNote(null)}>
+                Dismiss
+              </button>
+            </p>
+          )}
           <ListWrap
             status={busy === 'Loading' ? 'Loading…' : busy === 'Verifying' ? 'Verifying…' : null}
           >
@@ -789,6 +921,32 @@ export default function App() {
                       onClick={() => setLogin({ server: row.server, label: row.label })}
                     >
                       Authorize
+                    </button>
+                  )}
+                  {/*
+                   * The mirror of Authorize, and never shown beside it. A
+                   * `needs_auth` row has no grant to replace, so it wants the
+                   * browser step on its own; every other row wants the logout
+                   * first, or Webflow reuses the registered client and waves
+                   * the consent screen — and the site picker — through.
+                   *
+                   * That deliberately includes `failed`, `pending_approval`
+                   * and `unknown`. A stale or wrongly scoped grant is a common
+                   * cause of the first, the third means we could not find out,
+                   * and there is a grant to drop in all three. Hiding the one
+                   * repair for a connection on a guess about its health would
+                   * withhold it exactly when it is wanted; the sheet spells
+                   * out the cost before anything happens.
+                   */}
+                  {row.health !== 'needs_auth' && (
+                    <button
+                      disabled={busy !== null}
+                      title="Replace this connection's Webflow authorization"
+                      onClick={() =>
+                        setReauthing({ server: row.server, label: row.label, sites: row.sites })
+                      }
+                    >
+                      Reauthorize
                     </button>
                   )}
                   <button
@@ -916,11 +1074,32 @@ export default function App() {
         />
       )}
 
+      {reauthing && (
+        <ConfirmReauth
+          server={reauthing.server}
+          label={reauthing.label}
+          sites={reauthing.sites}
+          busy={busy !== null}
+          onCancel={() => setReauthing(null)}
+          onConfirm={confirmReauth}
+        />
+      )}
+
       {login && (
         <Suspense fallback={null}>
           <LoginTerminal
             server={login.server}
             label={login.label}
+            reauth={login.reauth ?? false}
+            /*
+             * LoginTerminal attaches its exit listener in a mount-once effect,
+             * so this closure — and the `verifyServer` inside it, and the
+             * `reauthWatch` inside that — is the one from the render where the
+             * sheet first appeared. `confirmReauth` therefore has to arm
+             * reauthWatch in the same batch as setLogin, not after it. Move
+             * that set later and the unchanged-grant banner stops firing, with
+             * nothing failing to say so.
+             */
             onExit={(code) => {
               if (code === 0) void verifyServer(login.server)
             }}

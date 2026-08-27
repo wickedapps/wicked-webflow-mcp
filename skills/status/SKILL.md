@@ -39,7 +39,7 @@ The front door. Show every connection, its health, its verified scope, whether i
 
 Lead with whichever of these the JSON actually shows, and stop at the first two. Do not append a menu of everything else.
 
-1. **`health` is not `connected`** — `needs_auth` means the grant is gone and the client is unreachable until they re-authorize.
+1. **`health` is not `connected`** — `needs_auth` means the grant is gone and the client is unreachable until they re-authorize. Offer `/wwm:reauth`; it keeps the name, the label and the project activation, and replaces only the grant. Do not offer `/wwm:remove` — there is nothing to clean up and it would cost them the connection.
 2. **`activation.fileConflict: true`** — `.wicked-webflow` lists a different set and wins at session start, so the current set will be undone next session. Offer `/wwm:switch … --write`.
 3. **Nothing active and `activation.connectorsSuppressed: false`** — Claude Code can load its own `claude.ai Webflow` connector here instead, a grant this plugin did not scope. Explain it and ask; never write the key on their behalf.
 4. **A connection with `sites: null`** — never checked. Say it costs about $0.04 to find out what it reaches, and ask before spending it.

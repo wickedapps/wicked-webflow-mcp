@@ -68,10 +68,13 @@ From inside Claude Code:
 /wwm:verify dino              # what can it actually reach?
 /wwm:status                   # everything, at a glance
 /wwm:switch dino              # load only this client in this project
+/wwm:reauth dino              # same name, new grant — when the reach is wrong
 /wwm:remove dino              # end of engagement
 ```
 
 **Authorizing has one step Claude Code cannot do for you.** `claude mcp login` opens a browser and needs a real terminal; the agent's shell does not have one. So `/wwm:connect` registers the connection, briefs you on the consent screen, and hands you a `claude mcp login wf-<slug>` line to paste into your own terminal. That is the design, not a limitation being worked around — the one irreducibly human step stays with the human.
+
+The same applies to `/wwm:reauth`, which needs the browser twice over. In a session it hands back the two commands and revokes nothing, because a revocation done on the strength of a command you might never paste costs you a working connection and buys you nothing.
 
 The [desktop app](#desktop-app) is the other way through that step: it owns a pty, so it can run the login itself.
 
@@ -106,6 +109,7 @@ Run `wwm` with no arguments and you get a dashboard and a menu:
     Switch which clients load here
     Connect a new client
     Verify what a connection can reach
+    Reauthorize a connection
     Remove a connection
     Doctor
 
@@ -121,13 +125,15 @@ wwm connect dino --label "Dino Studios"
 wwm verify dino
 wwm status
 wwm switch dino --write
+wwm reauth dino
 wwm remove dino --yes
 ```
 
-Three of them open a picker when you leave the arguments off:
+Four of them open a picker when you leave the arguments off:
 
 - **`wwm switch`** — a checkbox list, pre-ticked to what is active now, so confirming without changes is a no-op and it is safe to open just to look. It prints the per-connection tool cost underneath, because that is what you are actually choosing between.
 - **`wwm verify`** — pre-ticked to the connections that are stale or have never been checked, with a running `about $0.08 · about 20s` that moves as you toggle. Anything verified in the last week starts unticked, so the default is the cheap correct one.
+- **`wwm reauth`** — same list, showing what each connection reaches today, because that is the thing you are about to replace. It confirms once, on a screen that says the new grant replaces rather than extends.
 - **`wwm remove`** — shows what each connection currently reaches in the list, offers `switch` first, and asks you to type the name. It destroys the grant, so it is deliberately harder than everything else.
 
 **Interactive only means interactive.** Piped, scripted, `--json`, `--quiet`, `--yes`, or with no TTY, every command behaves exactly as it did before — bare `wwm` prints usage and exits 2, and bare `wwm verify` still means `--all`. Nothing automated can start hanging on a prompt. If your terminal renders the redrawing pickers badly, `WWM_NO_RAW=1` switches them to numbered lists with the same choices.
@@ -179,6 +185,12 @@ This is the part worth reading slowly, because the pitch and the mechanism are n
 **Scoping limits which sites, never what can be done to them.** Within an authorized site the grant covers Designer-API element creation, CMS writes, style and custom-code changes, and asset management. "Scoped to this client" does not mean read-only, restricted, or safe. It means a mistake is confined to that client's sites instead of every client you have.
 
 **None of the three surfaces sees your credentials.** Every connection change is made by shelling out to the `claude` CLI. Tokens live in Claude Code's keychain storage; `wwm` reads connection names and health, and nothing else.
+
+**Changing what a connection reaches means a new grant, not an edited one.** There is no API for "add one more site to this authorization" — Webflow's consent screen builds a grant from scratch every time, so anything left unticked is dropped, including sites the connection reaches today. `wwm reauth <slug>` is that round-trip with the name kept: the server entry, the label, the verification history and which projects load it all survive, and only the grant is replaced. Use it when the reach is wrong, when the client's sites move to another workspace (a grant cannot span two, so this is the only way), or when `health` reads `needs_auth` and the grant is simply gone.
+
+**Reauthorizing is a logout *and* a login, and the logout is the half that matters.** Reading Claude Code 2.1.231's own implementation: `claude mcp login` revokes the stored tokens before it opens the browser, but it preserves the `clientId` of the OAuth client already registered for that server — so the flow arrives as a returning client and Webflow can approve it against the grant it already has on file, without ever showing the picker. `claude mcp logout` deletes that record outright, `clientId` included. So the logout is what makes the next login a first-time login, and it is the reason `wwm reauth` runs both. The Claude Code half of that is measured; that Webflow then auto-approves a returning client without showing the picker is inferred from it and has not been confirmed against Webflow's authorization server. Logout-first is the safe order regardless — and if a reauthorization comes back with the same site list you started with, revoke the app in Webflow's own settings and go again.
+
+**Between the logout and a finished login, the connection reaches nothing, and there is no undo.** The old credential is destroyed by the first step. Every path through `reauth` says so before it spends anything, and the two non-interactive paths refuse to take that step unless asked for it explicitly.
 
 **`remove` destroys the grant.** On Claude Code 2.1.223, removing a server invalidates its stored authorization everywhere, at any scope. There is no way to remove a connection and keep its token, which is why deactivating for one project is `wwm switch` and never `remove`.
 

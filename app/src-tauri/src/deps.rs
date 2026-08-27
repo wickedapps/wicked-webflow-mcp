@@ -156,6 +156,20 @@ fn claude_extras() -> Vec<PathBuf> {
     v
 }
 
+/// Resolve the Claude Code executable once, using the same rules as the
+/// prerequisite check. Callers must launch this path rather than searching for
+/// `claude` again: the fallback locations can sit outside a Finder-launched
+/// app's PATH.
+pub(crate) fn claude_bin() -> Option<PathBuf> {
+    if let Ok(pin) = std::env::var("WWM_CLAUDE_BIN") {
+        let path = PathBuf::from(pin);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    wwm::find_bin("claude", &claude_extras(), false)
+}
+
 fn probe_node() -> Probe {
     let required = format!("{MIN_NODE_MAJOR}");
     probe_named(
@@ -170,20 +184,10 @@ fn probe_node() -> Probe {
 
 fn probe_claude() -> Probe {
     let required = format!("{}.{}.{}", MIN_CLAUDE.0, MIN_CLAUDE.1, MIN_CLAUDE.2);
-    if let Ok(pin) = std::env::var("WWM_CLAUDE_BIN") {
-        let path = PathBuf::from(&pin);
-        if path.is_file() {
-            return probe_path(&path, &["--version"], claude_ok, &required);
-        }
+    match claude_bin() {
+        Some(path) => probe_path(&path, &["--version"], claude_ok, &required),
+        None => missing(&required),
     }
-    probe_named(
-        "claude",
-        &claude_extras(),
-        &["--version"],
-        claude_ok,
-        &required,
-        false,
-    )
 }
 
 fn collect() -> Deps {

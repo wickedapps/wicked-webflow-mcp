@@ -78,6 +78,28 @@ export interface VerifyResult extends Envelope {
   }>
 }
 
+/**
+ * A `reauth` payload. One key set covers every path the command can take, so
+ * the half we do not use is present and null: `--revoke-only` revokes and
+ * stops, which means `authorized` is always false and `verified`/`changed`
+ * are always null. Whether the grant came back is the pty's story, not this
+ * call's.
+ */
+export interface ReauthResult extends Envelope {
+  ok: boolean
+  server: string
+  label: string
+  /** Sites the grant that was just dropped reached. `null` means it was never verified. */
+  previous: { sites: string[]; at: string } | null
+  revoked: boolean
+  logoutCommand: string | null
+  /** The command that finishes the job. We run it on the pty instead of printing it. */
+  loginCommand: string | null
+  authorized: boolean
+  verified: unknown
+  changed: unknown
+}
+
 interface RawOutput {
   code: number
   json: unknown
@@ -238,6 +260,17 @@ export const verify = (project: Project, server?: string) =>
 
 export const remove = (project: Project, server: string) =>
   run<{ ok: boolean }>(['remove', server, '--yes'], project)
+
+/**
+ * Drop a connection's grant and stop, leaving the browser step to us.
+ *
+ * `--revoke-only` exists for exactly this caller: the CLI will not run
+ * `claude mcp login` without a TTY, and LoginTerminal has a pty. `--yes`
+ * because ConfirmReauth has already asked, and the CLI otherwise refuses a
+ * revocation nobody confirmed.
+ */
+export const reauth = (project: Project, server: string) =>
+  run<ReauthResult>(['reauth', server, '--revoke-only', '--yes'], project)
 
 export const slugify = (input: string): string =>
   input
