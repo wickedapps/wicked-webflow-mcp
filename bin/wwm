@@ -22,6 +22,8 @@ export const MIN_NODE_MAJOR = 22
 export const DEFAULT_URL = 'https://mcp.webflow.com/mcp'
 export const DEFAULT_PREFIX = 'wf-'
 export const PLUGIN_ID = 'wicked-webflow-mcp'
+export const STATE_VERSION = 2
+export const CLAUDE_CODE_HOST = 'claude-code'
 // npm ships only this file, so the version cannot be read from package.json.
 // Bump in lockstep with package.json, plugin.json, and marketplace.json.
 // `node scripts/release.mjs stamp <version>` does all of them at once.
@@ -1301,16 +1303,209 @@ function stateDir() {
 
 function statePath() { return join(stateDir(), 'state.json') }
 
+function plainObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+}
+
+function bindingState(binding) {
+  if (binding?.removedAt) return 'absent'
+  if (binding?.lastVerified?.ok) return 'verified'
+  if (binding?.lastVerified && !binding.lastVerified.ok) return 'error'
+  return binding?.state ?? 'configured'
+}
+
+function clientSlugForServer(server, clients, pfx) {
+  const unprefixed = String(server).startsWith(pfx) ? String(server).slice(pfx.length) : String(server)
+  const base = slugify(unprefixed) || 'client'
+  let candidate = base
+  for (let suffix = 2; clients[candidate]; suffix++) {
+    const existing = clients[candidate]?.bindings?.[CLAUDE_CODE_HOST]?.server
+    if (existing === server) return candidate
+    candidate = `${base}-${suffix}`
+  }
+  return candidate
+}
+
+/**
+ * Convert the persisted registry to schema v2 without mutating the input.
+ *
+ * V1 used MCP server names as client identity. V2 gives a client a stable
+ * slug and puts the server name under a host binding. Project activation is
+ * migrated to those client slugs. Hosted connections start empty because a
+ * local Claude grant says nothing about an OpenAI-hosted plugin grant.
+ */
+export function migrateState(raw, { pfx = DEFAULT_PREFIX } = {}) {
+  const source = plainObject(raw)
+  if (source.version === STATE_VERSION) {
+    return {
+      version: STATE_VERSION,
+      clients: structuredClone(plainObject(source.clients)),
+      hostedConnections: structuredClone(plainObject(source.hostedConnections)),
+      projects: structuredClone(plainObject(source.projects)),
+    }
+  }
+  if (source.version !== undefined && source.version !== 1) {
+    throw new Error(`Unsupported state schema version ${source.version}; this build supports 1 and ${STATE_VERSION}`)
+  }
+
+  const clients = {}
+  const serverToSlug = new Map()
+  for (const [server, value] of Object.entries(plainObject(source.connections))) {
+    const connection = plainObject(value)
+    const slug = clientSlugForServer(server, clients, pfx)
+    serverToSlug.set(server, slug)
+    const binding = {
+      server,
+      state: bindingState(connection),
+      addedAt: connection.addedAt ?? null,
+    }
+    if (connection.lastVerified !== undefined) binding.lastVerified = structuredClone(connection.lastVerified)
+    if (connection.removedAt !== undefined) binding.removedAt = connection.removedAt
+    clients[slug] = {
+      label: connection.label ?? slug,
+      addedAt: connection.addedAt ?? null,
+      bindings: { [CLAUDE_CODE_HOST]: binding },
+    }
+  }
+
+  const projects = {}
+  for (const [dir, value] of Object.entries(plainObject(source.projects))) {
+    const project = plainObject(value)
+    const next = { ...structuredClone(project) }
+    if (Array.isArray(project.active)) {
+      next.active = project.active.map((entry) => {
+        if (serverToSlug.has(entry)) return serverToSlug.get(entry)
+        const unprefixed = String(entry).startsWith(pfx) ? String(entry).slice(pfx.length) : String(entry)
+        return slugify(unprefixed)
+      })
+    }
+    projects[dir] = next
+  }
+
+  return { version: STATE_VERSION, clients, hostedConnections: {}, projects }
+}
+
+/**
+ * Present schema v2 through the current Claude-only command code.
+ *
+ * This projection is temporary. It lets the state migration ship before the
+ * host adapter refactor without changing the CLI JSON contract consumed by
+ * the desktop app. saveState folds mutations back into canonical v2.
+ */
+export function projectStateForClaude(stored, { pfx = DEFAULT_PREFIX } = {}) {
+  const canonical = migrateState(stored, { pfx })
+  const connections = {}
+  const slugToServer = new Map()
+
+  for (const [slug, clientValue] of Object.entries(canonical.clients)) {
+    const client = plainObject(clientValue)
+    const binding = plainObject(client.bindings)?.[CLAUDE_CODE_HOST]
+    if (!binding?.server) continue
+    slugToServer.set(slug, binding.server)
+    connections[binding.server] = {
+      label: client.label ?? slug,
+      addedAt: client.addedAt ?? binding.addedAt ?? null,
+      ...(binding.lastVerified !== undefined ? { lastVerified: structuredClone(binding.lastVerified) } : {}),
+      ...(binding.previousVerified !== undefined ? { previousVerified: structuredClone(binding.previousVerified) } : {}),
+      ...(binding.reauthorizedAt !== undefined ? { reauthorizedAt: binding.reauthorizedAt } : {}),
+      ...(binding.removedAt !== undefined ? { removedAt: binding.removedAt } : {}),
+    }
+  }
+
+  const projects = {}
+  for (const [dir, projectValue] of Object.entries(canonical.projects)) {
+    const project = plainObject(projectValue)
+    projects[dir] = {
+      ...structuredClone(project),
+      ...(Array.isArray(project.active)
+        ? { active: project.active.map((slug) => slugToServer.get(slug) ?? `${pfx}${slug}`) }
+        : {}),
+    }
+  }
+
+  return { ...canonical, connections, projects }
+}
+
+/** Fold the Claude-only compatibility projection back into persisted v2. */
+export function storeStateFromClaude(runtime, { pfx = DEFAULT_PREFIX } = {}) {
+  const canonical = migrateState(runtime, { pfx })
+  const clients = structuredClone(canonical.clients)
+  const hostedConnections = structuredClone(canonical.hostedConnections)
+  const connections = plainObject(runtime.connections)
+  const serverToSlug = new Map()
+
+  for (const [slug, clientValue] of Object.entries(clients)) {
+    const binding = plainObject(clientValue?.bindings)?.[CLAUDE_CODE_HOST]
+    if (binding?.server) serverToSlug.set(binding.server, slug)
+  }
+
+  // A missing projected connection means its Claude binding was purged. Keep
+  // the client only if another host binding or hosted declaration still uses it.
+  for (const [server, slug] of serverToSlug) {
+    if (connections[server]) continue
+    const client = clients[slug]
+    delete client.bindings[CLAUDE_CODE_HOST]
+    const hostedUsesClient = Object.values(hostedConnections)
+      .some((hosted) => Array.isArray(hosted?.clientSlugs) && hosted.clientSlugs.includes(slug))
+    if (Object.keys(plainObject(client.bindings)).length === 0 && !hostedUsesClient) delete clients[slug]
+  }
+
+  for (const [server, value] of Object.entries(connections)) {
+    const connection = plainObject(value)
+    let slug = serverToSlug.get(server)
+    if (!slug) {
+      slug = clientSlugForServer(server, clients, pfx)
+      serverToSlug.set(server, slug)
+    }
+    const previous = plainObject(clients[slug])
+    const bindings = { ...plainObject(previous.bindings) }
+    const priorBinding = plainObject(bindings[CLAUDE_CODE_HOST])
+    const binding = {
+      ...priorBinding,
+      server,
+      state: bindingState(connection),
+      addedAt: priorBinding.addedAt ?? connection.addedAt ?? null,
+    }
+    for (const key of ['lastVerified', 'previousVerified', 'reauthorizedAt', 'removedAt']) delete binding[key]
+    if (connection.lastVerified !== undefined) binding.lastVerified = structuredClone(connection.lastVerified)
+    if (connection.previousVerified !== undefined) binding.previousVerified = structuredClone(connection.previousVerified)
+    if (connection.reauthorizedAt !== undefined) binding.reauthorizedAt = connection.reauthorizedAt
+    if (connection.removedAt !== undefined) binding.removedAt = connection.removedAt
+    bindings[CLAUDE_CODE_HOST] = binding
+    clients[slug] = {
+      ...previous,
+      label: connection.label ?? previous.label ?? slug,
+      addedAt: previous.addedAt ?? connection.addedAt ?? null,
+      bindings,
+    }
+  }
+
+  const projects = {}
+  for (const [dir, projectValue] of Object.entries(plainObject(runtime.projects))) {
+    const project = plainObject(projectValue)
+    projects[dir] = {
+      ...structuredClone(project),
+      ...(Array.isArray(project.active)
+        ? {
+            active: project.active.map((entry) => {
+              if (serverToSlug.has(entry)) return serverToSlug.get(entry)
+              const unprefixed = String(entry).startsWith(pfx) ? String(entry).slice(pfx.length) : String(entry)
+              return slugify(unprefixed)
+            }),
+          }
+        : {}),
+    }
+  }
+
+  return { version: STATE_VERSION, clients, hostedConnections, projects }
+}
+
 function loadState() {
   const p = statePath()
-  if (!existsSync(p)) return { version: 1, connections: {}, projects: {} }
+  if (!existsSync(p)) return projectStateForClaude({ version: STATE_VERSION, clients: {}, hostedConnections: {}, projects: {} }, { pfx: prefix() })
   try {
     const parsed = JSON.parse(readFileSync(p, 'utf8'))
-    return {
-      version: parsed.version ?? 1,
-      connections: parsed.connections ?? {},
-      projects: parsed.projects ?? {},
-    }
+    return projectStateForClaude(migrateState(parsed, { pfx: prefix() }), { pfx: prefix() })
   } catch (e) {
     throw new Fail(EXIT.GENERIC, `Could not read ${p}: ${e.message}`, 'Delete or repair the file and try again. It holds no secrets.')
   }
@@ -1318,7 +1513,8 @@ function loadState() {
 
 function saveState(state) {
   if (ctx.dryRun) return
-  writeFileSync(statePath(), JSON.stringify(state, null, 2) + '\n')
+  const stored = storeStateFromClaude(state, { pfx: prefix() })
+  writeFileSync(statePath(), JSON.stringify(stored, null, 2) + '\n')
 }
 
 /**
