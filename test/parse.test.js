@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url'
 
 import {
   SITES_COL,
+  STATE_VERSION,
   VERIFY_STALE_MS,
   WICKED_FILE,
   applyKey,
@@ -29,6 +30,7 @@ import {
   isMainPath,
   menuItems,
   mergeDisabled,
+  migrateState,
   mutatesServerList,
   parseArgv,
   pickedIndexes,
@@ -47,6 +49,8 @@ import {
   resolveActiveSet,
   sameList,
   slugify,
+  projectStateForClaude,
+  storeStateFromClaude,
   toServerName,
   validateSlug,
   VERSION,
@@ -258,6 +262,98 @@ test('slugify and validateSlug enforce the tool-name charset', () => {
   assert.match(validateSlug('-leading'), /must match/)
   assert.match(validateSlug('Upper'), /must match/)
   assert.match(validateSlug('x'.repeat(33)), /32 characters/)
+})
+
+// ---------------------------------------------------------------------------
+// state schema migration
+// ---------------------------------------------------------------------------
+
+test('state v1 migrates to host-neutral v2 without losing verification or project activation', () => {
+  const migrated = migrateState({
+    version: 1,
+    connections: {
+      'wf-dino': {
+        label: 'Dino Studios',
+        addedAt: '2026-01-01T00:00:00Z',
+        lastVerified: {
+          at: '2026-01-02T00:00:00Z',
+          ok: true,
+          sites: ['Dino'],
+          workspaceIds: ['workspace-1'],
+        },
+      },
+    },
+    projects: {
+      '/work/dino': { active: ['wf-dino'], at: '2026-01-03T00:00:00Z' },
+    },
+  })
+
+  assert.equal(migrated.version, STATE_VERSION)
+  assert.equal(migrated.connections, undefined)
+  assert.deepEqual(migrated.projects['/work/dino'].active, ['dino'])
+  assert.equal(migrated.clients.dino.label, 'Dino Studios')
+  assert.deepEqual(migrated.clients.dino.bindings['claude-code'], {
+    server: 'wf-dino',
+    state: 'verified',
+    addedAt: '2026-01-01T00:00:00Z',
+    lastVerified: {
+      at: '2026-01-02T00:00:00Z',
+      ok: true,
+      sites: ['Dino'],
+      workspaceIds: ['workspace-1'],
+    },
+  })
+  assert.deepEqual(migrated.hostedConnections, {})
+})
+
+test('a newer state schema is rejected instead of being mistaken for empty v1 state', () => {
+  assert.throws(
+    () => migrateState({ version: STATE_VERSION + 1, clients: { dino: {} } }),
+    /Unsupported state schema version/,
+  )
+})
+
+test('Claude compatibility projection round-trips v2 and preserves other hosts and hosted metadata', () => {
+  const stored = {
+    version: STATE_VERSION,
+    clients: {
+      dino: {
+        label: 'Dino Studios',
+        addedAt: '2026-01-01T00:00:00Z',
+        bindings: {
+          'claude-code': { server: 'wf-dino', state: 'configured', addedAt: '2026-01-01T00:00:00Z' },
+          'codex-local': { server: 'wf-dino', state: 'authorized', addedAt: '2026-01-02T00:00:00Z' },
+        },
+      },
+    },
+    hostedConnections: {
+      webflow: { provider: 'openai-hosted', clientSlugs: ['dino'], managed: false },
+    },
+    projects: {
+      '/work/dino': { active: ['dino'], at: '2026-01-03T00:00:00Z' },
+    },
+  }
+
+  const runtime = projectStateForClaude(stored)
+  assert.deepEqual(runtime.projects['/work/dino'].active, ['wf-dino'])
+  runtime.connections['wf-dino'].lastVerified = { at: '2026-01-04T00:00:00Z', ok: true, sites: ['Dino'] }
+
+  const roundTrip = storeStateFromClaude(runtime)
+  assert.deepEqual(roundTrip.projects['/work/dino'].active, ['dino'])
+  assert.equal(roundTrip.clients.dino.bindings['claude-code'].state, 'verified')
+  assert.equal(roundTrip.clients.dino.bindings['codex-local'].state, 'authorized')
+  assert.deepEqual(roundTrip.hostedConnections, stored.hostedConnections)
+})
+
+test('the first state mutation persists v2 while CLI output remains schema v1', (t) => {
+  const box = sandbox(t)
+  const out = box.run(['switch', 'a', '--project', box.base])
+  const stored = JSON.parse(readFileSync(join(box.data, 'state.json'), 'utf8'))
+
+  assert.equal(out.schemaVersion, 1)
+  assert.equal(stored.version, STATE_VERSION)
+  assert.equal(stored.connections, undefined)
+  assert.deepEqual(stored.projects[realpathSync(box.base)].active, ['a'])
 })
 
 test('version parsing and comparison', () => {
@@ -559,7 +655,7 @@ test('switch --default forgets plugin state so later connections load too', (t) 
   const box = sandbox(t)
 
   box.run(['switch', 'a', '--project', project])
-  assert.deepEqual(JSON.parse(readFileSync(join(box.data, 'state.json'), 'utf8')).projects[key].active, ['wf-a'])
+  assert.deepEqual(JSON.parse(readFileSync(join(box.data, 'state.json'), 'utf8')).projects[key].active, ['a'])
   assert.equal(box.run(['activate', '--for-cwd', '--project', project]).source, 'plugin state')
 
   const out = box.run(['switch', '--default', '--project', project])
@@ -579,7 +675,7 @@ test('switch --all still remembers the set — that is not default', (t) => {
   const out = box.run(['switch', '--all', '--project', project])
   assert.deepEqual(out.active, ['wf-a', 'wf-b'])
   assert.equal(out.source, 'plugin state')
-  assert.deepEqual(JSON.parse(readFileSync(join(box.data, 'state.json'), 'utf8')).projects[key].active, ['wf-a', 'wf-b'])
+  assert.deepEqual(JSON.parse(readFileSync(join(box.data, 'state.json'), 'utf8')).projects[key].active, ['a', 'b'])
 })
 
 test('switch --default cannot be combined with a set', (t) => {
