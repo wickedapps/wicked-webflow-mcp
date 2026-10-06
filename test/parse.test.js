@@ -38,6 +38,7 @@ import {
   verifyPlan,
   parseHealth,
   reauthReport,
+  rowHealth,
   parseMcpGet,
   parseMcpList,
   parsePersistedOutput,
@@ -53,7 +54,8 @@ import {
 } from '../bin/wwm'
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', '2.1.223')
-const fixture = (name) => readFileSync(join(FIXTURES, name), 'utf8')
+const fixture = (name, version = '2.1.223') =>
+  readFileSync(join(dirname(FIXTURES), version, name), 'utf8')
 
 // ---------------------------------------------------------------------------
 // mcp list
@@ -100,14 +102,59 @@ test('parseMcpList recognises all four health states', () => {
   assert.deepEqual(servers.map((s) => s.health), ['connected', 'needs_auth', 'failed', 'pending_approval'])
 })
 
-test('parseMcpList degrades loudly on an unknown status', () => {
-  // Reporting a wrong status is far worse than reporting none. An unrecognised
-  // line must be reported as unparsed so the caller can exit 7.
-  const { servers, unparsed, ok } = parseMcpList(fixture('mcp-list-unknown-glyph.txt'))
+test('parseMcpList reads an unknown status as unknown, not as a parse failure', () => {
+  // Reporting a wrong status is far worse than reporting none, so a status
+  // word we have never seen is `unknown`, never the nearest known state. But
+  // the line is well-formed, so it must not take every other row down with it:
+  // that is how 2.1.291's "Disabled for this project" broke every project with
+  // a connection switched off.
+  const { servers, unparsed, unrecognised, ok } = parseMcpList(fixture('mcp-list-unknown-glyph.txt'))
+  assert.equal(ok, true)
+  assert.deepEqual(unparsed, [])
+  assert.deepEqual(servers.map((s) => s.health), ['connected', 'unknown'])
+  assert.equal(unrecognised.length, 1)
+  assert.match(unrecognised[0], /Reticulating splines/)
+})
+
+test('parseMcpList still degrades loudly on a line it cannot split', () => {
+  // No "name: target - status" shape means the format itself moved, and a
+  // server may have been lost entirely. That stays a hard failure.
+  const { unparsed, ok } = parseMcpList('Checking MCP server health…\n\nwf-a: https://mcp.webflow.com/mcp ✔ Connected\n')
   assert.equal(ok, false)
-  assert.equal(servers.length, 1)
   assert.equal(unparsed.length, 1)
-  assert.match(unparsed[0], /Reticulating splines/)
+})
+
+test('parseMcpList reads real 2.1.291 output', () => {
+  const { servers, unparsed, unrecognised, ok } = parseMcpList(fixture('mcp-list.txt', '2.1.291'))
+  assert.equal(ok, true, `unparsed lines: ${unparsed.join(' | ')}`)
+  assert.deepEqual(unrecognised, [])
+  const health = Object.fromEntries(servers.map((s) => [s.name, s.health]))
+  assert.deepEqual(health, {
+    'claude.ai Webflow': 'connected',
+    'claude.ai some.tool': 'needs_auth',
+    'claude.ai Empty': 'unknown',
+    'local-bin': 'failed',
+    'home-bin': 'connected',
+    'wf-dino': 'connected',
+    'wf-northgate': 'disabled',
+    'wf-oldclient': 'failed',
+    'wf-halfway': 'failed',
+    'wf-teamrepo': 'pending_approval',
+  })
+})
+
+test('parseMcpList keeps the 2.1.291 (HTTP) marker in the target', () => {
+  const { servers } = parseMcpList(fixture('mcp-list.txt', '2.1.291'))
+  assert.equal(servers.find((s) => s.name === 'wf-dino').target, 'https://mcp.webflow.com/mcp (HTTP)')
+})
+
+test('parseMcpList keeps an error message containing a dash out of the target', () => {
+  // "Failed to connect — ENOENT: …" carries the reason after an em dash. The
+  // split is on the last " - ", which the reason must not move.
+  const { servers } = parseMcpList(fixture('mcp-list.txt', '2.1.291'))
+  const local = servers.find((s) => s.name === 'local-bin')
+  assert.ok(local.target.endsWith('--agent cli'))
+  assert.match(local.statusText, /^✘ Failed to connect — ENOENT/)
 })
 
 test('parseMcpList skips the health-check header and blank lines', () => {
@@ -126,6 +173,29 @@ test('parseHealth matches on words, not glyphs', () => {
   assert.equal(parseHealth('✘ Failed to connect'), 'failed')
   assert.equal(parseHealth('⏸ Pending approval'), 'pending_approval')
   assert.equal(parseHealth('Doing something new'), null)
+})
+
+test('parseHealth reads the 2.1.291 states', () => {
+  assert.equal(parseHealth('⊘ Disabled for this project (re-enable via /mcp)'), 'disabled')
+  assert.equal(parseHealth('✘ Connection error'), 'failed')
+  assert.equal(parseHealth('- Not configured'), 'unknown')
+  // Starts with "Connected" but the tools are not reachable. Reading it as
+  // connected would be exactly the wrong status the parser exists to avoid.
+  assert.equal(parseHealth('! Connected · tools fetch failed'), 'failed')
+})
+
+test('rowHealth: an inactive row is disabled, and a stale disabled is unknown', () => {
+  // 2.1.291 does not health-check a server that is off in the directory it
+  // runs in, so an inactive row has nothing to report but `disabled`.
+  assert.equal(rowHealth('connected', false), 'disabled')
+  assert.equal(rowHealth('checking', false), 'disabled')
+  assert.equal(rowHealth('disabled', false), 'disabled')
+  // A list from before a switch, or from another directory, says disabled for
+  // a row that is on here now. Stale is not good news.
+  assert.equal(rowHealth('disabled', true), 'unknown')
+  assert.equal(rowHealth('connected', true), 'connected')
+  assert.equal(rowHealth('needs_auth', true), 'needs_auth')
+  assert.equal(rowHealth('checking', true), 'checking')
 })
 
 // ---------------------------------------------------------------------------
@@ -687,6 +757,82 @@ test('removing a connection drops the list cache', (t) => {
   })
 
   assert.equal(existsSync(cache), false, 'the next read must go to `claude mcp list`, not to a snapshot taken before the removal')
+})
+
+/**
+ * A project with wf-b switched off, and a stub `claude` whose `mcp list` says
+ * what 2.1.291 says there.
+ */
+function disabledBox(t) {
+  const base = mkdtempSync(join(tmpdir(), 'wwm-disabled-'))
+  t.after(() => rmSync(base, { recursive: true, force: true }))
+
+  const data = join(base, 'data')
+  const project = join(base, 'project')
+  const other = join(base, 'other')
+  for (const d of [data, project, other]) mkdirSync(d, { recursive: true })
+  writeFileSync(join(data, 'state.json'), JSON.stringify({
+    version: 1,
+    connections: {
+      'wf-a': { label: 'A', addedAt: '2026-01-01T00:00:00Z' },
+      'wf-b': { label: 'B', addedAt: '2026-01-01T00:00:00Z' },
+    },
+    projects: {},
+  }))
+  const claudeJson = join(base, 'claude.json')
+  writeFileSync(claudeJson, JSON.stringify({
+    projects: { [realpathSync(project)]: { disabledMcpServers: ['wf-b'] } },
+  }))
+
+  const list = 'Checking MCP server health…\n\n' +
+    'wf-a: https://mcp.webflow.com/mcp (HTTP) - ✔ Connected\n' +
+    'wf-b: https://mcp.webflow.com/mcp (HTTP) - ⊘ Disabled for this project (re-enable via /mcp)\n'
+  const listFile = join(base, 'mcp-list.txt')
+  writeFileSync(listFile, list)
+  const stub = join(base, 'claude')
+  writeFileSync(stub, `#!/bin/sh\ncase "$1" in\n  --version) echo "2.1.291 (Claude Code)" ;;\n  mcp) cat '${listFile}' ;;\nesac\nexit 0\n`, { mode: 0o755 })
+
+  const env = { ...process.env, WWM_CLAUDE_BIN: stub, WWM_CLAUDE_JSON: claudeJson, CLAUDE_PLUGIN_DATA: data }
+  const status = (cwd) => JSON.parse(execFileSync(process.execPath, [WWM, 'status', '--json'], { cwd, env, encoding: 'utf8' }))
+  return { data, project, other, env, status }
+}
+
+test('status reads a project with a connection switched off on 2.1.291', (t) => {
+  // The reported bug: "Couldn't read `claude mcp list` output" in every
+  // project where wwm had switched a connection off.
+  const box = disabledBox(t)
+  const out = box.status(box.project)
+  const health = Object.fromEntries(out.servers.map((r) => [r.server, [r.health, r.active]]))
+  assert.deepEqual(health, { 'wf-a': ['connected', true], 'wf-b': ['disabled', false] })
+})
+
+test('the list cache is never served in another directory', (t) => {
+  // `mcp list` answers for the directory it ran in, so a snapshot taken where
+  // wf-b is off must not tell another project that wf-b is off there too.
+  const box = disabledBox(t)
+  box.status(box.project)
+  const cached = JSON.parse(readFileSync(join(box.data, 'mcp-list-cache.json'), 'utf8'))
+  assert.equal(cached.dir, realpathSync(box.project))
+
+  const elsewhere = box.status(box.other)
+  assert.equal(elsewhere.cached, false, 'a different directory must take a fresh list')
+  // The stub still prints Disabled, which for a row active here is stale.
+  assert.equal(elsewhere.servers.find((r) => r.server === 'wf-b').health, 'unknown')
+})
+
+test('switching drops the list cache', (t) => {
+  // A switch moves a server between "disabled" and a real health on the very
+  // next read, so the snapshot from before it is wrong about that row.
+  const box = disabledBox(t)
+  box.status(box.project)
+  const cache = join(box.data, 'mcp-list-cache.json')
+  assert.ok(existsSync(cache))
+  execFileSync(process.execPath, [WWM, 'switch', '--all', '--json'], {
+    cwd: box.project,
+    env: box.env,
+    encoding: 'utf8',
+  })
+  assert.equal(existsSync(cache), false)
 })
 
 // ---------------------------------------------------------------------------

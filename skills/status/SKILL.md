@@ -25,9 +25,9 @@ The front door. Show every connection, its health, its verified scope, whether i
 
 ## Reading the fields
 
-**`health`** comes from `claude mcp list` and describes the *connection*: `connected`, `needs_auth`, `failed`, `pending_approval`.
+**`health`** comes from `claude mcp list` and describes the *connection*: `connected`, `needs_auth`, `failed`, `pending_approval`, `disabled` or `unknown`. `disabled` means the connection is inactive here, so Claude Code (2.1.291+) did not check it; it says nothing about whether the connection works. `unknown` means the list said something wwm could not read, or was taken before the last switch.
 
-**`active`** is unrelated to health and cannot be read from `claude mcp list` — a deactivated server still prints `✔ Connected`. It comes from the project's `disabledMcpServers`. A connection can be healthy and inactive; that is the normal state for every client you are not currently working on.
+**`active`** comes from the project's `disabledMcpServers`, not from `claude mcp list`. Every inactive row has `health: "disabled"`. A connection can be healthy and inactive; that is the normal state for every client you are not currently working on.
 
 **`sites: null`** means never verified — not verified-and-fine. Say "unverified", never "fine", and offer to run `wwm verify` yourself. Do not tell the user to run it; `wwm` is on your `PATH` in this session and very likely not on theirs.
 
@@ -39,7 +39,7 @@ The front door. Show every connection, its health, its verified scope, whether i
 
 Lead with whichever of these the JSON actually shows, and stop at the first two. Do not append a menu of everything else.
 
-1. **`health` is not `connected`** — `needs_auth` means the grant is gone and the client is unreachable until they re-authorize. Offer `/wwm:reauth`; it keeps the name, the label and the project activation, and replaces only the grant. Do not offer `/wwm:remove` — there is nothing to clean up and it would cost them the connection.
+1. **`health` is not `connected`, `disabled` or `unknown`** — `needs_auth` means the grant is gone and the client is unreachable until they re-authorize. Offer `/wwm:reauth`; it keeps the name, the label and the project activation, and replaces only the grant. Do not offer `/wwm:remove` — there is nothing to clean up and it would cost them the connection.
 2. **`activation.fileConflict: true`** — `.wicked-webflow` lists a different set and wins at session start, so the current set will be undone next session. Offer `/wwm:switch … --write`.
 3. **Nothing active and `activation.connectorsSuppressed: false`** — Claude Code can load its own `claude.ai Webflow` connector here instead, a grant this plugin did not scope. Explain it and ask; never write the key on their behalf.
 4. **A connection with `sites: null`** — never checked. Say it costs about $0.04 to find out what it reaches, and ask before spending it.
