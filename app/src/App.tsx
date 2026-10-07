@@ -281,6 +281,7 @@ const HEALTH_LABEL: Record<wwm.Health, string> = {
   needs_auth: 'Needs auth',
   failed: 'Failed',
   pending_approval: 'Pending approval',
+  disabled: 'Not checked here',
   unknown: 'Unknown',
 }
 
@@ -363,7 +364,14 @@ function ConnectionStatus({ row }: { row: wwm.ServerRow }) {
   if (row.verifyFailed) return <Status kind="bad">Verification failed</Status>
   return (
     <>
-      <Status kind={row.health === 'connected' ? 'ok' : 'warn'}>{HEALTH_LABEL[row.health]}</Status>
+      {row.health === 'disabled' ? (
+        // Off here, so `mcp list` skipped it. Neither good nor bad news. An
+        // active row still saying `disabled` was just switched on and is
+        // waiting on the reread in `toggle`.
+        <span className="muted">{row.active ? 'Checking…' : HEALTH_LABEL.disabled}</span>
+      ) : (
+        <Status kind={row.health === 'connected' ? 'ok' : 'warn'}>{HEALTH_LABEL[row.health]}</Status>
+      )}
       <span className="muted">·</span>
       <Sites row={row} />
     </>
@@ -386,11 +394,43 @@ function projectSummary(
   return `${active} active here (from ${formatSource(data.activation.source)})`
 }
 
+/**
+ * `mcp list` skips a server that is off in the project, so switching one off
+ * leaves it with no health. Switching one on leaves `disabled` in place until
+ * `mergeHealth` brings the real answer; see `ConnectionStatus`.
+ */
 function applyActive(data: wwm.StatusResult, active: string[]): wwm.StatusResult {
   const set = new Set(active)
   return {
     ...data,
-    servers: data.servers.map((s) => ({ ...s, active: set.has(s.server) })),
+    servers: data.servers.map((s) => {
+      const on = set.has(s.server)
+      return { ...s, active: on, health: on ? s.health : 'disabled' }
+    }),
+  }
+}
+
+/** Rows switched on that have not been health-checked since. */
+function awaitingHealth(data: wwm.StatusResult): boolean {
+  return data.servers.some((s) => s.active && s.health === 'disabled')
+}
+
+/**
+ * Take health from a fresh status read and nothing else, the same rule as
+ * `applyHealth` in bin/wwm. Active flags stay as they are on screen, because
+ * another toggle may have landed while the read was in flight. A fresh read
+ * that still says `disabled` for a row that is on now is stale for that row.
+ */
+function mergeHealth(cur: wwm.StatusResult, fresh: wwm.StatusResult | null): wwm.StatusResult {
+  const byName = new Map(fresh?.servers.map((s) => [s.server, s]))
+  return {
+    ...cur,
+    servers: cur.servers.map((s) => {
+      if (!s.active) return { ...s, health: 'disabled' }
+      const f = byName.get(s.server)
+      const health = !f || f.health === 'disabled' ? 'unknown' : f.health
+      return { ...s, health, statusText: f?.statusText ?? s.statusText }
+    }),
   }
 }
 
@@ -624,6 +664,20 @@ export default function App() {
     }
   }
 
+  /**
+   * Switching a server on gives it a health it did not have, and `mcp list` is
+   * the only place that health comes from. Reread in the background, without
+   * the busy flag: the switch itself is done and the card already says
+   * Checking…, so nothing should wait on a 2-4s health check.
+   */
+  const recheck = (dir: wwm.Project, after: wwm.StatusResult) => {
+    if (!awaitingHealth(after)) return
+    void wwm.status(dir).then(
+      (fresh) => setData((cur) => (cur ? mergeHealth(cur, fresh) : cur)),
+      () => setData((cur) => (cur ? mergeHealth(cur, null) : cur)),
+    )
+  }
+
   const toggle = (row: wwm.ServerRow) => {
     if (!data || !project || busy) return
     const next = data.servers
@@ -640,6 +694,7 @@ export default function App() {
         const res = await wwm.switchTo(project, next)
         setData((cur) => (cur ? applySwitch(cur, res) : cur))
         setError(null)
+        recheck(project, applyActive(data, res.active))
       } catch (e) {
         setData(previous)
         setError(caught(e))
@@ -659,6 +714,7 @@ export default function App() {
         const res = await wwm.switchDefault(project)
         setData((cur) => (cur ? applySwitch(cur, res) : cur))
         setError(null)
+        recheck(project, applyActive(data, res.active))
       } catch (e) {
         setData(previous)
         setError(caught(e))

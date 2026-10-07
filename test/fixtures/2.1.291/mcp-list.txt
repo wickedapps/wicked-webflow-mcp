@@ -1,0 +1,12 @@
+Checking MCP server health…
+
+claude.ai Webflow: https://mcp.webflow.com/mcp - ✔ Connected
+claude.ai some.tool: https://mcp.example.com/mcp - ! Needs authentication
+claude.ai Empty: https://mcp.example.org/mcp - - Not configured
+local-bin: /Applications/Example.app/Contents/Resources/example-mcp --app desktop --agent cli - ✘ Failed to connect — ENOENT: ENOENT: no such file or directory, posix_spawn '/Applications/Example.app/Contents/Resources/example-mcp'
+home-bin: /Users/example/.local/bin/example-mcp  - ✔ Connected
+wf-dino: https://mcp.webflow.com/mcp (HTTP) - ✔ Connected
+wf-northgate: https://mcp.webflow.com/mcp (HTTP) - ⊘ Disabled for this project (re-enable via /mcp)
+wf-oldclient: https://mcp.webflow.com/mcp (HTTP) - ✘ Connection error
+wf-halfway: https://mcp.webflow.com/mcp (HTTP) - ! Connected · tools fetch failed
+wf-teamrepo: https://mcp.webflow.com/mcp (HTTP) - ⏸ Pending approval

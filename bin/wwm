@@ -25,7 +25,7 @@ export const PLUGIN_ID = 'wicked-webflow-mcp'
 // npm ships only this file, so the version cannot be read from package.json.
 // Bump in lockstep with package.json, plugin.json, and marketplace.json.
 // `node scripts/release.mjs stamp <version>` does all of them at once.
-export const VERSION = '0.7.1'
+export const VERSION = '0.8.0'
 
 /**
  * The shape of `--json` output, versioned independently of VERSION.
@@ -59,23 +59,35 @@ export const EXIT = {
 // ---------------------------------------------------------------------------
 // PARSERS. Pure, fixture-tested. No I/O in this section.
 //
-// `claude mcp list` and `claude mcp get` have no --json as of 2.1.223, so we
+// `claude mcp list` and `claude mcp get` have no --json as of 2.1.291, so we
 // parse human-readable output from a CLI that ships several times a week.
-// This is the top ongoing maintenance cost of the project. On any line we do
-// not recognise we degrade loudly (exit 7) rather than guessing a status.
+// This is the top ongoing maintenance cost of the project. A line whose shape
+// we do not recognise degrades loudly (exit 7). A well-formed line with a
+// status word we have never seen reads as `unknown`: never a guess, and never
+// a reason to take down every other row with it.
 // ---------------------------------------------------------------------------
 
+// Order matters: "Connected · tools fetch failed" must hit `failed` before the
+// bare `connected` pattern sees its first word.
 const HEALTH_PATTERNS = [
+  [/^connected\b.*\bfailed\b/i, 'failed'],
   [/^connected\b/i, 'connected'],
   [/^needs authentication\b/i, 'needs_auth'],
   [/^failed to connect\b/i, 'failed'],
+  [/^connection error\b/i, 'failed'],
   [/^pending approval\b/i, 'pending_approval'],
+  // 2.1.291 stopped health-checking servers in disabledMcpServers and prints
+  // "⊘ Disabled for this project (re-enable via /mcp)" for them instead.
+  [/^disabled\b/i, 'disabled'],
+  // A claude.ai connector with nothing behind it. Recognised, but it says
+  // nothing about reachability.
+  [/^not configured\b/i, 'unknown'],
 ]
 
 /**
  * Map the status half of a list line ("✔ Connected") to a stable key.
- * Returns null when unrecognised. Callers must treat that as a parse
- * failure, never as a default.
+ * Returns null when unrecognised. Callers must treat that as `unknown`,
+ * never as a guess at the nearest known state.
  */
 export function parseHealth(statusText) {
   // Strip the leading glyph (✔ ! ✘ ⏸) and match on the words. Matching text
@@ -89,7 +101,8 @@ export function parseHealth(statusText) {
 /**
  * Parse `claude mcp list`.
  *
- * Real 2.1.223 output. Note there is NO "(HTTP)" transport marker:
+ * Real 2.1.223 output. 2.1.291 adds an "(HTTP)" marker after the URL of
+ * an `http` server, which stays part of the target:
  *
  *   Checking MCP server health…
  *
@@ -106,6 +119,9 @@ export function parseHealth(statusText) {
 export function parseMcpList(text) {
   const servers = []
   const unparsed = []
+  // Well-formed lines whose status word is new to us. Kept apart from
+  // `unparsed` so `doctor` can name them without failing.
+  const unrecognised = []
 
   for (const raw of String(text).split('\n')) {
     const line = raw.trimEnd()
@@ -125,12 +141,12 @@ export function parseMcpList(text) {
     const target = rest.slice(0, sep).trim()
     const statusText = rest.slice(sep + 3).trim()
     const health = parseHealth(statusText)
-    if (!health) { unparsed.push(line); continue }
+    if (!health) unrecognised.push(line)
 
-    servers.push({ name, target, health, statusText, raw: line })
+    servers.push({ name, target, health: health ?? 'unknown', statusText, raw: line })
   }
 
-  return { servers, unparsed, ok: unparsed.length === 0 }
+  return { servers, unparsed, unrecognised, ok: unparsed.length === 0 }
 }
 
 /**
@@ -1396,6 +1412,7 @@ function writeDisabledFor(dir, list) {
     try { unlinkSync(tmp) } catch { /* nothing to clean up */ }
     return { ok: false, key, reason: `could not write ${p}: ${e.message}` }
   }
+  invalidateListCache()
   return { ok: true, key, changed: true, before, after: list }
 }
 
@@ -1479,9 +1496,11 @@ function preflight({ full = false } = {}) {
     checks.push({
       name: 'mcp list output parses',
       ok: parsed.ok,
-      detail: parsed.ok
-        ? `${parsed.servers.length} server(s) recognised`
-        : `${parsed.unparsed.length} unrecognised line(s): ${parsed.unparsed[0]}`,
+      detail: !parsed.ok
+        ? `${parsed.unparsed.length} unrecognised line(s): ${parsed.unparsed[0]}`
+        : parsed.unrecognised.length
+          ? `${parsed.servers.length} server(s) recognised, ${parsed.unrecognised.length} with a status wwm does not know: ${parsed.unrecognised[0]}`
+          : `${parsed.servers.length} server(s) recognised`,
     })
   }
 
@@ -1503,16 +1522,28 @@ function requirePreflight() {
 
 function cachePath() { return join(stateDir(), 'mcp-list-cache.json') }
 
-/** Called from runClaude for anything that changes the server set. */
+/**
+ * Called from runClaude for anything that changes the server set, and from
+ * writeDisabledFor, since a disabled server lists as disabled, not as its health.
+ */
 function invalidateListCache() {
   try { unlinkSync(cachePath()) } catch { /* nothing cached, or already gone */ }
 }
 
-/** The cache if it is young enough to trust, else null. Never calls out. */
+/**
+ * `mcp list` answers for the directory it ran in: from 2.1.291 a server
+ * disabled there lists as disabled rather than with its health. So a cache
+ * written in one project is never served in another.
+ */
+function writeListCache(parsed) {
+  try { writeFileSync(cachePath(), JSON.stringify({ at: Date.now(), dir: resolvedCwd(), data: parsed })) } catch { /* cache is optional */ }
+}
+
+/** The cache if it is young enough to trust and from this directory, else null. Never calls out. */
 function peekListCache(staleSeconds = 60) {
   try {
     const cached = JSON.parse(readFileSync(cachePath(), 'utf8'))
-    if (Date.now() - cached.at < staleSeconds * 1000) return { ...cached.data, cached: true }
+    if (cached.dir === resolvedCwd() && Date.now() - cached.at < staleSeconds * 1000) return { ...cached.data, cached: true }
   } catch { /* nothing cached, or unreadable */ }
   return null
 }
@@ -1537,7 +1568,7 @@ function listServers({ refresh = false, staleSeconds = 60 } = {}) {
     )
   }
 
-  try { writeFileSync(cachePath(), JSON.stringify({ at: Date.now(), data: parsed })) } catch { /* cache is optional */ }
+  writeListCache(parsed)
   return { ...parsed, cached: false }
 }
 
@@ -1620,7 +1651,7 @@ function startListFetch() {
     // so an unreadable list costs them the health column and nothing else.
     if (!parsed.ok) return { servers: [], unparsed: parsed.unparsed, ok: false, cached: false }
 
-    try { writeFileSync(cachePath(), JSON.stringify({ at: Date.now(), data: parsed })) } catch { /* cache is optional */ }
+    writeListCache(parsed)
     return { ...parsed, cached: false }
   }
 }
@@ -2434,6 +2465,20 @@ function confirmReauth(name, label, previous) {
  * can never disagree, and the agent gets the same picture in one call rather
  * than three.
  */
+/**
+ * A row's health, given what `mcp list` said and whether the row is active here.
+ *
+ * From 2.1.291 `mcp list` does not connect to a server disabled for the
+ * directory it runs in, so an inactive row has no health to report, only
+ * `disabled`. The reverse also happens: a list taken before a switch, or in
+ * another directory, can say `disabled` for a row that is active now. That
+ * list is stale for this row, and stale is `unknown`, not good news.
+ */
+export function rowHealth(listed, active) {
+  if (!active) return 'disabled'
+  return listed === 'disabled' ? 'unknown' : listed
+}
+
 function gatherStatus({ refresh = false, staleSeconds = 60, dir = resolvedCwd(), listed = null } = {}) {
   const state = loadState()
   listed = listed ?? listServers({ refresh, staleSeconds })
@@ -2444,10 +2489,11 @@ function gatherStatus({ refresh = false, staleSeconds = 60, dir = resolvedCwd(),
   const rows = owned.map((s) => {
     const conn = state.connections[s.name]
     const v = conn?.lastVerified
+    const active = !disabled.has(s.name)
     return {
       server: s.name,
       label: conn?.label ?? '—',
-      health: s.health,
+      health: rowHealth(s.health, active),
       statusText: s.statusText,
       sites: v?.ok ? v.sites : null,
       workspaceIds: v?.ok ? (v.workspaceIds ?? []) : [],
@@ -2455,9 +2501,10 @@ function gatherStatus({ refresh = false, staleSeconds = 60, dir = resolvedCwd(),
       singleSite: v?.ok ? (v.singleSite ?? v.isolated ?? null) : null,
       verifiedAt: v?.at ?? null,
       verifyFailed: Boolean(v && !v.ok),
-      // ACTIVE is not an `mcp list` field. A disabled server still prints
-      // "✔ Connected". It must be read from disabledMcpServers.
-      active: !disabled.has(s.name),
+      // ACTIVE is read from disabledMcpServers, not inferred from the list.
+      // Before 2.1.291 a disabled server still printed "✔ Connected"; after
+      // it, the list's answer depends on which directory it ran in.
+      active,
     }
   })
 
@@ -2497,7 +2544,7 @@ function applyHealth(snap, listed) {
   const byName = new Map(listed.servers.map((s) => [s.name, s]))
   for (const r of snap.rows) {
     const s = byName.get(r.server)
-    r.health = s ? s.health : 'unknown'
+    r.health = rowHealth(s ? s.health : 'unknown', r.active)
     r.statusText = s ? s.statusText : null
   }
   snap.listed = listed
@@ -2523,7 +2570,7 @@ function cmdStatus(args) {
 
   human('CONNECTION'.padEnd(18) + 'LABEL'.padEnd(14) + 'HEALTH'.padEnd(12) + 'SITES'.padEnd(SITES_COL) + 'ACTIVE')
   for (const r of rows) {
-    const health = { connected: sym.ok, needs_auth: '! auth', failed: sym.bad, pending_approval: '⏸ pending', unknown: '?' }[r.health] ?? '?'
+    const health = { connected: sym.ok, needs_auth: '! auth', failed: sym.bad, pending_approval: '⏸ pending', disabled: '–', unknown: '?' }[r.health] ?? '?'
     const age = r.sites === null ? '' : ` (${relativeTime(r.verifiedAt)})`
     const sites = formatSites(r.sites, age, SITES_COL)
     human(r.server.padEnd(18) + String(r.label).slice(0, 13).padEnd(14) + health.padEnd(12) + sites.padEnd(SITES_COL) + (r.active ? sym.dot : sym.ring))
@@ -2591,8 +2638,8 @@ function dashboardLines({ rows, activation, dir }, { tick = 0 } = {}) {
     // `checking` is the one health that is neither good nor bad news, so it
     // gets the spinner and the dim treatment rather than the warning glyph.
     // An unresolved column must not read as a problem for the seconds it takes
-    // to resolve.
-    const health = r.health === 'connected' ? ''
+    // to resolve. `disabled` says nothing the hollow dot does not already say.
+    const health = r.health === 'connected' || r.health === 'disabled' ? ''
       : r.health === 'checking' ? ` ${c.dim(`${SPIN[tick % SPIN.length]} checking`)}`
       : ` ${sym.warn} ${r.health.replace(/_/g, ' ')}`
     const body = `${pad(r.server, nameW)}  ${pad(clip(String(r.label), labelW), labelW)}  ${reach}${health}`

@@ -9,7 +9,8 @@ interface Envelope {
   schemaVersion: number
 }
 
-export type Health = 'connected' | 'needs_auth' | 'failed' | 'pending_approval' | 'unknown'
+/** `disabled` means `mcp list` did not check it: it is off in this project (Claude Code 2.1.291+). */
+export type Health = 'connected' | 'needs_auth' | 'failed' | 'pending_approval' | 'disabled' | 'unknown'
 
 export interface ServerRow {
   server: string
@@ -22,7 +23,7 @@ export interface ServerRow {
   singleSite: boolean | null
   verifiedAt: string | null
   verifyFailed: boolean
-  /** Read from disabledMcpServers, not from `mcp list`. A disabled server still reports Connected. */
+  /** Read from disabledMcpServers, not from `mcp list`. An inactive row's health is always `disabled`. */
   active: boolean
 }
 
